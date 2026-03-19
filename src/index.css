@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+:root {
+  --bg-base: #1e1e1e;
+  --bg-panel: #252526;
+  --bg-surface: #2d2d2d;
+  --bg-hover: #37373d;
+  --bg-selected: #094771;
+  --border: #3e3e42;
+  --text: #cccccc;
+  --text-muted: #858585;
+  --text-bright: #ffffff;
+  --accent: #0078d4;
+  --accent-hover: #1084d8;
+  --danger: #f44747;
+  --success: #6a9955;
+  --toolbar-height: 36px;
+  --menubar-height: 28px;
+  --statusbar-height: 24px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-base);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  user-select: none;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track { background: var(--bg-panel); }
+::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #777; }
+
+input, select, textarea {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 13px;
+  outline: none;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 3px;
+  font-size: 13px;
+  padding: 5px 12px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+
+.btn-secondary {
+  background: var(--bg-surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.btn-secondary:hover { background: var(--bg-hover); }
+
+.btn-danger {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+.btn-danger:hover { background: rgba(244, 71, 71, 0.1); }
+
+/* Resize handle */
+[data-panel-resize-handle-id] {
+  background: var(--border);
+  transition: background 0.15s;
+}
+[data-panel-resize-handle-id]:hover,
+[data-panel-resize-handle-id][data-resize-handle-active] {
+  background: var(--accent);
+}
