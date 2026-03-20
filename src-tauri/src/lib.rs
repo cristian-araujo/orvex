@@ -32,6 +32,7 @@ pub fn run() {
             // Query
             execute_query,
             get_table_data,
+            apply_table_edits,
             // Schema
             get_databases,
             get_tables,

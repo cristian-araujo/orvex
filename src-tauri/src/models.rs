@@ -132,3 +132,35 @@ pub struct TableStructure {
     pub foreign_keys: Vec<ForeignKeyInfo>,
     pub create_sql: String,
 }
+
+// --- Data editing ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TableEditOperation {
+    Update {
+        where_values: Vec<(String, serde_json::Value)>,
+        set_values: Vec<(String, serde_json::Value)>,
+    },
+    Insert {
+        values: Vec<(String, serde_json::Value)>,
+    },
+    Delete {
+        where_values: Vec<(String, serde_json::Value)>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableEditRequest {
+    pub database: String,
+    pub table: String,
+    pub primary_keys: Vec<String>,
+    pub operations: Vec<TableEditOperation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyEditsResult {
+    pub success: bool,
+    pub rows_affected: u64,
+    pub message: String,
+}

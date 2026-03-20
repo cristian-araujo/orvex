@@ -171,12 +171,24 @@ export function ObjectBrowser() {
   const loadTablePreview = async (db: string, table: string) => {
     if (!activeConnectionId) return;
     try {
-      const sql = `SELECT * FROM \`${db}\`.\`${table}\` LIMIT 1000`;
-      const result = await invoke<import("../../types").QueryResult>("execute_query", {
-        connectionId: activeConnectionId,
-        sql,
-      });
-      setDataResult(result, `${db}.${table}`);
+      const key = tableKey(db, table);
+      const [result, cols] = await Promise.all([
+        invoke<import("../../types").QueryResult>("execute_query", {
+          connectionId: activeConnectionId,
+          sql: `SELECT * FROM \`${db}\`.\`${table}\` LIMIT 1000`,
+        }),
+        columns[key]
+          ? Promise.resolve(columns[key])
+          : invoke<import("../../types").ColumnInfo[]>("get_columns", {
+              connectionId: activeConnectionId,
+              database: db,
+              table,
+            }),
+      ]);
+      if (!columns[key]) {
+        setColumns(key, cols);
+      }
+      setDataResult(result, `${db}.${table}`, db, table, cols);
     } catch (e) {
       console.error(e);
     }

@@ -31,6 +31,10 @@ function projectSession(session: ConnectionSession | undefined) {
       activeBottomTab: "results" as BottomTab,
       dataResult: null as QueryResult | null,
       dataTableName: null as string | null,
+      dataDatabase: null as string | null,
+      dataTable: null as string | null,
+      dataColumns: null as ColumnInfo[] | null,
+      dataPrimaryKeys: [] as string[],
     };
   }
   return {
@@ -49,6 +53,10 @@ function projectSession(session: ConnectionSession | undefined) {
     activeBottomTab: session.activeBottomTab,
     dataResult: session.dataResult,
     dataTableName: session.dataTableName,
+    dataDatabase: session.dataDatabase,
+    dataTable: session.dataTable,
+    dataColumns: session.dataColumns,
+    dataPrimaryKeys: session.dataPrimaryKeys,
   };
 }
 
@@ -92,6 +100,10 @@ interface AppState {
   activeBottomTab: BottomTab;
   dataResult: QueryResult | null;
   dataTableName: string | null;
+  dataDatabase: string | null;
+  dataTable: string | null;
+  dataColumns: ColumnInfo[] | null;
+  dataPrimaryKeys: string[];
 
   // Session lifecycle
   createSession: (connectionId: string, name: string, config: ConnectionConfig, profileId?: string) => void;
@@ -120,7 +132,7 @@ interface AppState {
   setTabExecuting: (id: string, executing: boolean) => void;
   setTabError: (id: string, error: string | null) => void;
   setActiveBottomTab: (tab: BottomTab) => void;
-  setDataResult: (result: QueryResult | null, tableName: string | null) => void;
+  setDataResult: (result: QueryResult | null, tableName: string | null, database?: string | null, table?: string | null, columns?: ColumnInfo[] | null) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -149,6 +161,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeBottomTab: "results",
   dataResult: null,
   dataTableName: null,
+  dataDatabase: null,
+  dataTable: null,
+  dataColumns: null,
+  dataPrimaryKeys: [],
 
   // --- Session lifecycle ---
 
@@ -172,6 +188,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeBottomTab: "results",
       dataResult: null,
       dataTableName: null,
+      dataDatabase: null,
+      dataTable: null,
+      dataColumns: null,
+      dataPrimaryKeys: [],
     };
     const sessions = [...get().sessions, session];
     set({
@@ -333,6 +353,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   setActiveBottomTab: (tab) =>
     set((s) => withSessionUpdate(s, () => ({ activeBottomTab: tab }))),
 
-  setDataResult: (result, tableName) =>
-    set((s) => withSessionUpdate(s, () => ({ dataResult: result, dataTableName: tableName, activeBottomTab: "data" as BottomTab }))),
+  setDataResult: (result, tableName, database, table, columns) => {
+    const pks = (columns ?? []).filter((c) => c.key === "PRI").map((c) => c.field);
+    set((s) => withSessionUpdate(s, () => ({
+      dataResult: result,
+      dataTableName: tableName,
+      dataDatabase: database ?? null,
+      dataTable: table ?? null,
+      dataColumns: columns ?? null,
+      dataPrimaryKeys: pks,
+      activeBottomTab: "data" as BottomTab,
+    })));
+  },
 }));

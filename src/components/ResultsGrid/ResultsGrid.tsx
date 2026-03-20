@@ -1,8 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useCallback } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type { ColDef } from "ag-grid-community";
 import { themeAlpine, colorSchemeDark } from "ag-grid-community";
+import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../../store/useAppStore";
+import { EditableDataGrid } from "./EditableDataGrid";
 import type { QueryResult } from "../../types";
 
 const darkTheme = themeAlpine.withPart(colorSchemeDark);
@@ -59,13 +61,40 @@ function DataGrid({ result }: { result: QueryResult }) {
 }
 
 export function ResultsGrid() {
-  const { queryTabs, activeTabId, activeBottomTab, setActiveBottomTab, dataResult, dataTableName } = useAppStore();
+  const {
+    queryTabs, activeTabId, activeBottomTab, setActiveBottomTab,
+    dataResult, dataTableName, dataDatabase, dataTable, dataColumns, dataPrimaryKeys,
+    activeConnectionId, setDataResult, setColumns,
+  } = useAppStore();
 
   const activeTab = queryTabs.find((t) => t.id === activeTabId);
   const queryResult = activeTab?.result ?? null;
 
   // Determine which result to show stats for in the tab bar
   const visibleResult = activeBottomTab === "data" ? dataResult : queryResult;
+
+  // Reload data after apply
+  const handleDataReload = useCallback(async () => {
+    if (!activeConnectionId || !dataDatabase || !dataTable) return;
+    try {
+      const key = `${dataDatabase}.${dataTable}`;
+      const [result, cols] = await Promise.all([
+        invoke<QueryResult>("execute_query", {
+          connectionId: activeConnectionId,
+          sql: `SELECT * FROM \`${dataDatabase}\`.\`${dataTable}\` LIMIT 1000`,
+        }),
+        invoke<import("../../types").ColumnInfo[]>("get_columns", {
+          connectionId: activeConnectionId,
+          database: dataDatabase,
+          table: dataTable,
+        }),
+      ]);
+      setColumns(key, cols);
+      setDataResult(result, key, dataDatabase, dataTable, cols);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [activeConnectionId, dataDatabase, dataTable, setDataResult, setColumns]);
 
   const tabs = [
     { key: "data" as const, label: dataTableName ? `Data: ${dataTableName}` : "Data" },
@@ -118,14 +147,20 @@ export function ResultsGrid() {
       <div style={{ flex: 1, overflow: "hidden" }}>
         {activeBottomTab === "data" && (
           <>
-            {dataResult ? (
-              dataResult.columns.length > 0 ? (
-                <DataGrid result={dataResult} />
-              ) : (
-                <div style={{ padding: 12, color: "var(--text-muted)", fontSize: 12 }}>
-                  {dataTableName ? `Table ${dataTableName} is empty` : "No data"}
-                </div>
-              )
+            {dataResult && dataResult.columns.length > 0 && dataDatabase && dataTable && dataColumns && activeConnectionId ? (
+              <EditableDataGrid
+                result={dataResult}
+                database={dataDatabase}
+                table={dataTable}
+                columns={dataColumns}
+                primaryKeys={dataPrimaryKeys}
+                connectionId={activeConnectionId}
+                onDataReload={handleDataReload}
+              />
+            ) : dataResult ? (
+              <div style={{ padding: 12, color: "var(--text-muted)", fontSize: 12 }}>
+                {dataTableName ? `Table ${dataTableName} is empty` : "No data"}
+              </div>
             ) : (
               <div style={{ padding: 12, color: "var(--text-muted)", fontSize: 12 }}>
                 Click a table in the Object Browser to preview data

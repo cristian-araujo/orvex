@@ -125,4 +125,30 @@ export interface ConnectionSession {
   // Data preview (single click on table)
   dataResult: QueryResult | null;
   dataTableName: string | null;
+  dataDatabase: string | null;
+  dataTable: string | null;
+  dataColumns: ColumnInfo[] | null;
+  dataPrimaryKeys: string[];
+}
+
+// --- Data editing ---
+
+export interface TableEditOperation {
+  type: "Update" | "Insert" | "Delete";
+  where_values?: [string, unknown][];
+  set_values?: [string, unknown][];
+  values?: [string, unknown][];
+}
+
+export interface TableEditRequest {
+  database: string;
+  table: string;
+  primary_keys: string[];
+  operations: TableEditOperation[];
+}
+
+export interface ApplyEditsResult {
+  success: boolean;
+  rows_affected: number;
+  message: string;
 }
