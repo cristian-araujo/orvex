@@ -5,11 +5,39 @@ import { ConnectionDialog } from "./components/ConnectionManager/ConnectionDialo
 import { ObjectBrowser } from "./components/ObjectBrowser/ObjectBrowser";
 import { SqlEditor } from "./components/SqlEditor/SqlEditor";
 import { ResultsGrid } from "./components/ResultsGrid/ResultsGrid";
+import { TableStructure } from "./components/TableStructure/TableStructure";
 import { Toolbar } from "./components/Layout/Toolbar";
+import { ConnectionTabs } from "./components/Layout/ConnectionTabs";
 import { StatusBar } from "./components/Layout/StatusBar";
 
 function QueryTabs() {
-  const { queryTabs, activeTabId, setActiveTab, closeQueryTab, addQueryTab } = useAppStore();
+  const {
+    queryTabs, activeTabId, activeConnectionId,
+    setActiveTab, closeQueryTab, addQueryTab,
+    setTabResult, setTabExecuting, setTabError, setActiveBottomTab,
+  } = useAppStore();
+
+  const activeTab = queryTabs.find((t) => t.id === activeTabId);
+  const canExecute = activeTab?.type === "query" && !!activeTab.sql.trim();
+
+  const execute = async () => {
+    if (!activeTabId || !activeConnectionId || !canExecute) return;
+    setTabExecuting(activeTabId, true);
+    setTabError(activeTabId, null);
+    setActiveBottomTab("results");
+    try {
+      const result = await (await import("@tauri-apps/api/core")).invoke("execute_query", {
+        connectionId: activeConnectionId,
+        sql: activeTab!.sql.trim(),
+      });
+      setTabResult(activeTabId, result as any);
+    } catch (e) {
+      setTabError(activeTabId, String(e));
+      setActiveBottomTab("messages");
+    } finally {
+      setTabExecuting(activeTabId, false);
+    }
+  };
 
   return (
     <div style={{
@@ -17,78 +45,139 @@ function QueryTabs() {
       alignItems: "center",
       background: "var(--bg-panel)",
       borderBottom: "1px solid var(--border)",
-      overflowX: "auto",
       height: 34,
       flexShrink: 0,
     }}>
-      {queryTabs.map((tab) => (
-        <div
-          key={tab.id}
-          onClick={() => setActiveTab(tab.id)}
+      <div style={{ display: "flex", alignItems: "center", flex: 1, overflowX: "auto", height: "100%" }}>
+        {queryTabs.map((tab) => (
+          <div
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "0 12px",
+              height: "100%",
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+              fontSize: 12,
+              background: activeTabId === tab.id ? "var(--bg-surface)" : "transparent",
+              color: activeTabId === tab.id ? "var(--text-bright)" : "var(--text-muted)",
+              borderBottom: activeTabId === tab.id ? "2px solid var(--accent)" : "2px solid transparent",
+              borderRight: "1px solid var(--border)",
+            }}
+          >
+            <span>{tab.isExecuting ? "⟳" : tab.type === "table" ? "▤" : "📄"}</span>
+            <span>{tab.title}</span>
+            {queryTabs.length > 1 && (
+              <span
+                onClick={(e) => { e.stopPropagation(); closeQueryTab(tab.id); }}
+                style={{
+                  marginLeft: 4,
+                  opacity: 0.5,
+                  fontSize: 10,
+                  lineHeight: 1,
+                  padding: "1px 3px",
+                  borderRadius: 2,
+                }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLSpanElement).style.opacity = "1")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLSpanElement).style.opacity = "0.5")}
+              >
+                ✕
+              </span>
+            )}
+          </div>
+        ))}
+        <button
+          onClick={() => addQueryTab()}
           style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "0 12px",
+            background: "transparent",
+            border: "none",
+            color: "var(--text-muted)",
+            padding: "0 10px",
             height: "100%",
+            fontSize: 16,
             cursor: "pointer",
-            whiteSpace: "nowrap",
-            fontSize: 12,
-            background: activeTabId === tab.id ? "var(--bg-surface)" : "transparent",
-            color: activeTabId === tab.id ? "var(--text-bright)" : "var(--text-muted)",
-            borderBottom: activeTabId === tab.id ? "2px solid var(--accent)" : "2px solid transparent",
-            borderRight: "1px solid var(--border)",
+            flexShrink: 0,
           }}
+          title="New Tab (Ctrl+T)"
         >
-          <span>{tab.isExecuting ? "⟳" : "📄"}</span>
-          <span>{tab.title}</span>
-          {queryTabs.length > 1 && (
-            <span
-              onClick={(e) => { e.stopPropagation(); closeQueryTab(tab.id); }}
-              style={{
-                marginLeft: 4,
-                opacity: 0.5,
-                fontSize: 10,
-                lineHeight: 1,
-                padding: "1px 3px",
-                borderRadius: 2,
-              }}
-              onMouseEnter={(e) => ((e.currentTarget as HTMLSpanElement).style.opacity = "1")}
-              onMouseLeave={(e) => ((e.currentTarget as HTMLSpanElement).style.opacity = "0.5")}
-            >
-              ✕
-            </span>
-          )}
-        </div>
-      ))}
+          +
+        </button>
+      </div>
+      {/* Execute button */}
       <button
-        onClick={() => addQueryTab()}
+        onClick={execute}
+        disabled={!canExecute}
         style={{
           background: "transparent",
           border: "none",
-          color: "var(--text-muted)",
+          color: canExecute ? "var(--success)" : "var(--text-muted)",
           padding: "0 10px",
           height: "100%",
-          fontSize: 16,
-          cursor: "pointer",
+          fontSize: 12,
+          cursor: canExecute ? "pointer" : "default",
+          opacity: canExecute ? 1 : 0.4,
           flexShrink: 0,
+          borderLeft: "1px solid var(--border)",
         }}
-        title="New Tab (Ctrl+T)"
+        title="Execute (F9)"
       >
-        +
+        ▶ Execute
       </button>
     </div>
   );
 }
 
+function ActiveTabContent() {
+  const { queryTabs, activeTabId } = useAppStore();
+  const activeTab = queryTabs.find((t) => t.id === activeTabId);
+  const isTableTab = activeTab?.type === "table" && !!activeTab.database && !!activeTab.table;
+
+  return (
+    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <QueryTabs />
+
+      {/* Editor + Results: siempre montado, oculto cuando el tab activo es de tabla.
+          Evita destruir/recrear Monaco (20MB) en cada cambio de tab. */}
+      <div style={{ flex: 1, overflow: "hidden", display: isTableTab ? "none" : "flex", flexDirection: "column" }}>
+        <PanelGroup orientation="vertical" style={{ height: "100%" }}>
+          <Panel defaultSize="55%" minSize="80px">
+            <div style={{ height: "100%", overflow: "hidden" }}>
+              <SqlEditor />
+            </div>
+          </Panel>
+          <PanelResizeHandle style={{ height: 4, cursor: "row-resize" }} />
+          <Panel defaultSize="45%" minSize="60px">
+            <ResultsGrid />
+          </Panel>
+        </PanelGroup>
+      </div>
+
+      {/* TableStructure: solo montado cuando el tab activo es de tabla */}
+      {isTableTab && (
+        <div style={{ flex: 1, overflow: "hidden" }}>
+          <TableStructure database={activeTab!.database!} table={activeTab!.table!} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
-  const { showConnectionDialog, activeConnectionId, setShowConnectionDialog } = useAppStore();
+  const { showConnectionDialog, activeConnectionId, sessions, setShowConnectionDialog } = useAppStore();
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.key === "t") {
         e.preventDefault();
         useAppStore.getState().addQueryTab();
+      }
+      if (e.ctrlKey && e.key === "w") {
+        e.preventDefault();
+        const { activeTabId, closeQueryTab } = useAppStore.getState();
+        if (activeTabId) closeQueryTab(activeTabId);
       }
     };
     window.addEventListener("keydown", handler);
@@ -100,29 +189,17 @@ export default function App() {
       {showConnectionDialog && <ConnectionDialog />}
 
       <Toolbar />
+      <ConnectionTabs />
 
       <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
-        {activeConnectionId ? (
+        {sessions.length > 0 && activeConnectionId ? (
           <PanelGroup orientation="horizontal" style={{ height: "100%" }}>
             <Panel defaultSize="18%" minSize="150px" maxSize="50%">
               <ObjectBrowser />
             </Panel>
             <PanelResizeHandle style={{ width: 4, cursor: "col-resize" }} />
             <Panel minSize="25%">
-              <PanelGroup orientation="vertical" style={{ height: "100%" }}>
-                <Panel defaultSize="55%" minSize="80px">
-                  <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-                    <QueryTabs />
-                    <div style={{ flex: 1, overflow: "hidden" }}>
-                      <SqlEditor />
-                    </div>
-                  </div>
-                </Panel>
-                <PanelResizeHandle style={{ height: 4, cursor: "row-resize" }} />
-                <Panel defaultSize="45%" minSize="60px">
-                  <ResultsGrid />
-                </Panel>
-              </PanelGroup>
+              <ActiveTabContent />
             </Panel>
           </PanelGroup>
         ) : (

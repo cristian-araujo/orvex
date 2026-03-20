@@ -12,17 +12,69 @@ fn connections_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 
 #[tauri::command]
 pub async fn test_connection(config: ConnectionConfig) -> Result<String, String> {
-    let db_part = config.database.as_deref().unwrap_or("");
-    let url = format!(
-        "mysql://{}:{}@{}:{}/{}",
-        config.user, config.password, config.host, config.port, db_part
-    );
-    sqlx::mysql::MySqlPoolOptions::new()
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
+    use crate::ssh::tunnel::SshTunnel;
+
+    // Start temporary SSH tunnel if enabled
+    let ssh_tunnel = if config.ssh_enabled.unwrap_or(false) {
+        Some(SshTunnel::start(&config).await?)
+    } else {
+        None
+    };
+
+    let (effective_host, effective_port) = if let Some(ref tunnel) = ssh_tunnel {
+        ("127.0.0.1".to_string(), tunnel.local_port())
+    } else {
+        (config.host.clone(), config.port)
+    };
+
+    let mut opts = MySqlConnectOptions::new()
+        .host(&effective_host)
+        .port(effective_port)
+        .username(&config.user)
+        .password(&config.password);
+
+    if let Some(ref db) = config.database {
+        if !db.is_empty() {
+            opts = opts.database(db);
+        }
+    }
+
+    // SSL configuration
+    if config.ssl_enabled.unwrap_or(false) {
+        let ssl_mode = match config.ssl_mode.as_deref() {
+            Some("Disabled") => MySqlSslMode::Disabled,
+            Some("Required") => MySqlSslMode::Required,
+            Some("VerifyCa") => MySqlSslMode::VerifyCa,
+            Some("VerifyIdentity") => MySqlSslMode::VerifyIdentity,
+            _ => MySqlSslMode::Preferred,
+        };
+        opts = opts.ssl_mode(ssl_mode);
+
+        if let Some(ref ca) = config.ssl_ca_path {
+            if !ca.is_empty() { opts = opts.ssl_ca(ca); }
+        }
+        if let Some(ref cert) = config.ssl_cert_path {
+            if !cert.is_empty() { opts = opts.ssl_client_cert(cert); }
+        }
+        if let Some(ref key) = config.ssl_key_path {
+            if !key.is_empty() { opts = opts.ssl_client_key(key); }
+        }
+    }
+
+    let result = MySqlPoolOptions::new()
         .max_connections(1)
-        .connect(&url)
+        .connect_with(opts)
         .await
         .map(|_| "Connection successful".to_string())
-        .map_err(|e| format!("Connection failed: {}", e))
+        .map_err(|e| format!("Connection failed: {}", e));
+
+    // Clean up temporary tunnel
+    if let Some(tunnel) = ssh_tunnel {
+        tunnel.stop();
+    }
+
+    result
 }
 
 #[tauri::command]

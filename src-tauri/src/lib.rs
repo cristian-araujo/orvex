@@ -1,6 +1,7 @@
 mod models;
 mod db;
 mod commands;
+mod ssh;
 
 use db::manager::ConnectionManager;
 use commands::connection::*;
@@ -9,8 +10,16 @@ use commands::schema::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+    }
+
+    builder
         .manage(ConnectionManager::new())
         .invoke_handler(tauri::generate_handler![
             // Connection

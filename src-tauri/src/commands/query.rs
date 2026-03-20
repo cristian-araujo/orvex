@@ -21,10 +21,23 @@ fn cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
             }
         };
     }
+    // Stringified types (dates/times must go before String to get proper formatting)
+    macro_rules! try_opt_str {
+        ($ty:ty) => {
+            match row.try_get::<Option<$ty>, _>(i) {
+                Ok(Some(v)) => return serde_json::json!(v.to_string()),
+                Ok(None) => return serde_json::Value::Null,
+                Err(_) => {}
+            }
+        };
+    }
     try_opt!(i64);
     try_opt!(u64);
     try_opt!(f64);
     try_opt!(bool);
+    try_opt_str!(sqlx::types::chrono::NaiveDateTime);
+    try_opt_str!(sqlx::types::chrono::NaiveDate);
+    try_opt_str!(sqlx::types::chrono::NaiveTime);
     try_opt!(String);
     match row.try_get::<Option<Vec<u8>>, _>(i) {
         Ok(Some(v)) => serde_json::json!(format!("<BLOB: {} bytes>", v.len())),

@@ -25,4 +25,9 @@ serde_json = "1"
 sqlx = { version = "0.7", features = ["mysql", "runtime-tokio-native-tls", "chrono"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+russh = "0.46"
+russh-keys = "0.46"
+tauri-plugin-dialog = "2"
+tauri-plugin-mcp-bridge = "0.10"
 

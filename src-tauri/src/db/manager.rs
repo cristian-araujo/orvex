@@ -1,48 +1,156 @@
-use sqlx::{MySql, Pool, mysql::MySqlPoolOptions};
+use sqlx::{MySql, Pool, mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode}};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use crate::models::ConnectionConfig;
+use crate::ssh::tunnel::SshTunnel;
+
+struct ManagedConnection {
+    pool: Pool<MySql>,
+    ssh_tunnel: Option<SshTunnel>,
+}
 
 pub struct ConnectionManager {
-    pools: Mutex<HashMap<String, Pool<MySql>>>,
+    connections: Mutex<HashMap<String, ManagedConnection>>,
 }
 
 impl ConnectionManager {
     pub fn new() -> Self {
         Self {
-            pools: Mutex::new(HashMap::new()),
+            connections: Mutex::new(HashMap::new()),
         }
     }
 
     pub async fn connect(&self, id: &str, config: &ConnectionConfig) -> Result<(), String> {
-        let db_part = config.database.as_deref().unwrap_or("");
-        let url = format!(
-            "mysql://{}:{}@{}:{}/{}",
-            config.user, config.password, config.host, config.port, db_part
-        );
+        // Start SSH tunnel if enabled
+        let ssh_tunnel = if config.ssh_enabled.unwrap_or(false) {
+            Some(SshTunnel::start(config).await?)
+        } else {
+            None
+        };
 
-        let pool = MySqlPoolOptions::new()
+        // Determine effective host/port (tunnel or direct)
+        let (effective_host, effective_port) = if let Some(ref tunnel) = ssh_tunnel {
+            ("127.0.0.1".to_string(), tunnel.local_port())
+        } else {
+            (config.host.clone(), config.port)
+        };
+
+        // Build MySqlConnectOptions
+        let mut opts = MySqlConnectOptions::new()
+            .host(&effective_host)
+            .port(effective_port)
+            .username(&config.user)
+            .password(&config.password);
+
+        if let Some(ref db) = config.database {
+            if !db.is_empty() {
+                opts = opts.database(db);
+            }
+        }
+
+        // SSL configuration
+        if config.ssl_enabled.unwrap_or(false) {
+            let ssl_mode = match config.ssl_mode.as_deref() {
+                Some("Disabled") => MySqlSslMode::Disabled,
+                Some("Required") => MySqlSslMode::Required,
+                Some("VerifyCa") => MySqlSslMode::VerifyCa,
+                Some("VerifyIdentity") => MySqlSslMode::VerifyIdentity,
+                _ => MySqlSslMode::Preferred,
+            };
+            opts = opts.ssl_mode(ssl_mode);
+
+            if let Some(ref ca) = config.ssl_ca_path {
+                if !ca.is_empty() {
+                    opts = opts.ssl_ca(ca);
+                }
+            }
+            if let Some(ref cert) = config.ssl_cert_path {
+                if !cert.is_empty() {
+                    opts = opts.ssl_client_cert(cert);
+                }
+            }
+            if let Some(ref key) = config.ssl_key_path {
+                if !key.is_empty() {
+                    opts = opts.ssl_client_key(key);
+                }
+            }
+        }
+
+        let pool = match MySqlPoolOptions::new()
             .max_connections(5)
-            .connect(&url)
+            .connect_with(opts)
             .await
-            .map_err(|e| format!("Connection failed: {}", e))?;
+        {
+            Ok(pool) => pool,
+            Err(e) => {
+                // Clean up tunnel on connection failure
+                if let Some(tunnel) = ssh_tunnel {
+                    tunnel.stop();
+                }
+                return Err(format!("Connection failed: {}", e));
+            }
+        };
 
-        let mut pools = self.pools.lock().map_err(|e| e.to_string())?;
-        pools.insert(id.to_string(), pool);
+        // Apply post-connection settings
+        self.apply_session_settings(&pool, config).await;
+
+        let managed = ManagedConnection { pool, ssh_tunnel };
+        let mut conns = self.connections.lock().map_err(|e| e.to_string())?;
+        conns.insert(id.to_string(), managed);
         Ok(())
     }
 
+    /// Apply session-level settings after pool creation
+    async fn apply_session_settings(&self, pool: &Pool<MySql>, config: &ConnectionConfig) {
+        // Session idle timeout
+        if let Some(timeout) = config.session_timeout {
+            let sql = format!("SET SESSION wait_timeout = {}", timeout);
+            let _ = sqlx::query(&sql).execute(pool).await;
+        }
+
+        // Read-only mode
+        if config.read_only.unwrap_or(false) {
+            let _ = sqlx::query("SET SESSION TRANSACTION READ ONLY").execute(pool).await;
+        }
+
+        // SQL Mode (only if not using global value)
+        if !config.use_global_sql_mode.unwrap_or(true) {
+            if let Some(ref mode) = config.sql_mode {
+                if !mode.is_empty() {
+                    let sql = format!("SET SESSION sql_mode = '{}'", mode);
+                    let _ = sqlx::query(&sql).execute(pool).await;
+                }
+            }
+        }
+
+        // Init commands
+        if let Some(ref cmds) = config.init_commands {
+            for cmd in cmds.split(';') {
+                let cmd = cmd.trim();
+                if !cmd.is_empty() {
+                    let _ = sqlx::query(cmd).execute(pool).await;
+                }
+            }
+        }
+    }
+
     pub fn disconnect(&self, id: &str) -> Result<(), String> {
-        let mut pools = self.pools.lock().map_err(|e| e.to_string())?;
-        pools.remove(id);
+        let mut conns = self.connections.lock().map_err(|e| e.to_string())?;
+        if let Some(managed) = conns.remove(id) {
+            // Stop SSH tunnel if present
+            if let Some(tunnel) = managed.ssh_tunnel {
+                tunnel.stop();
+            }
+            // Pool is dropped here, closing all connections
+        }
         Ok(())
     }
 
     pub fn get_pool(&self, id: &str) -> Result<Pool<MySql>, String> {
-        let pools = self.pools.lock().map_err(|e| e.to_string())?;
-        pools
+        let conns = self.connections.lock().map_err(|e| e.to_string())?;
+        conns
             .get(id)
-            .cloned()
+            .map(|c| c.pool.clone())
             .ok_or_else(|| format!("No active connection: {}", id))
     }
 }

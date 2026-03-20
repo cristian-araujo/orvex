@@ -1,47 +1,26 @@
-import { useRef, useCallback } from "react";
+import { useRef, useCallback, useEffect } from "react";
 import MonacoEditor, { type OnMount } from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../../store/useAppStore";
 import type { editor } from "monaco-editor";
+import { KeyCode } from "monaco-editor";
 
 export function SqlEditor() {
-  const {
-    queryTabs,
-    activeTabId,
-    activeConnectionId,
-    updateTabSql,
-    setTabResult,
-    setTabExecuting,
-    setTabError,
-    setActiveBottomTab,
-  } = useAppStore();
+  const { queryTabs, activeTabId, updateTabSql } = useAppStore();
 
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  // Ref siempre apunta a la versión actual de executeQuery — evita stale closure en Monaco commands
+  const executeQueryRef = useRef<() => void>(() => {});
 
   const activeTab = queryTabs.find((t) => t.id === activeTabId);
 
-  const handleMount: OnMount = (editorInstance) => {
-    editorRef.current = editorInstance;
-
-    editorInstance.addCommand(
-      // F9 key code = 120
-      120,
-      () => executeQuery()
-    );
-    editorInstance.addCommand(
-      // F5 key code = 116
-      116,
-      () => executeQuery()
-    );
-  };
-
   const executeQuery = useCallback(async () => {
+    const { activeTabId, activeConnectionId } = useAppStore.getState();
     if (!activeTabId || !activeConnectionId) return;
 
     const tab = useAppStore.getState().queryTabs.find((t) => t.id === activeTabId);
     if (!tab) return;
 
-    // Get selected text or full content
     let sql = tab.sql.trim();
     const editor = editorRef.current;
     if (editor) {
@@ -53,23 +32,32 @@ export function SqlEditor() {
 
     if (!sql) return;
 
-    setTabExecuting(activeTabId, true);
-    setTabError(activeTabId, null);
-    setActiveBottomTab("results");
+    useAppStore.getState().setTabExecuting(activeTabId, true);
+    useAppStore.getState().setTabError(activeTabId, null);
+    useAppStore.getState().setActiveBottomTab("results");
 
     try {
-      const result = await invoke("execute_query", {
-        connectionId: activeConnectionId,
-        sql,
-      });
-      setTabResult(activeTabId, result as any);
+      const result = await invoke("execute_query", { connectionId: activeConnectionId, sql });
+      useAppStore.getState().setTabResult(activeTabId, result as any);
     } catch (e) {
-      setTabError(activeTabId, String(e));
-      setActiveBottomTab("messages");
+      useAppStore.getState().setTabError(activeTabId, String(e));
+      useAppStore.getState().setActiveBottomTab("messages");
     } finally {
-      setTabExecuting(activeTabId, false);
+      useAppStore.getState().setTabExecuting(activeTabId, false);
     }
-  }, [activeTabId, activeConnectionId]);
+  }, []); // sin deps — lee store directamente, nunca es stale
+
+  // Mantener el ref actualizado
+  useEffect(() => {
+    executeQueryRef.current = executeQuery;
+  }, [executeQuery]);
+
+  const handleMount: OnMount = (editorInstance) => {
+    editorRef.current = editorInstance;
+    // Los comandos invocan el ref, que siempre apunta a la función actual
+    editorInstance.addCommand(KeyCode.F9, () => executeQueryRef.current());
+    editorInstance.addCommand(KeyCode.F5, () => executeQueryRef.current());
+  };
 
   if (!activeTab) {
     return (

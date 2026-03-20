@@ -4,6 +4,38 @@ export interface ConnectionConfig {
   user: string;
   password: string;
   database?: string;
+
+  // SSH Tunnel
+  ssh_enabled?: boolean;
+  ssh_host?: string;
+  ssh_port?: number;
+  ssh_user?: string;
+  ssh_auth_method?: "password" | "key";
+  ssh_password?: string;
+  ssh_key_path?: string;
+  ssh_passphrase?: string;
+
+  // SSL/TLS
+  ssl_enabled?: boolean;
+  ssl_mode?: "Disabled" | "Preferred" | "Required" | "VerifyCa" | "VerifyIdentity";
+  ssl_ca_path?: string;
+  ssl_cert_path?: string;
+  ssl_key_path?: string;
+
+  // MySQL tab options
+  save_password?: boolean;
+  use_compression?: boolean;
+  read_only?: boolean;
+  session_timeout?: number;
+  keepalive_interval?: number;
+
+  // Advanced
+  bg_color?: string;
+  fg_color?: string;
+  selected_color?: string;
+  sql_mode?: string;
+  use_global_sql_mode?: boolean;
+  init_commands?: string;
 }
 
 export interface ConnectionProfile {
@@ -54,14 +86,43 @@ export interface TableStructure {
   create_sql: string;
 }
 
+export type TabType = "query" | "table";
+
 export interface QueryTab {
   id: string;
   title: string;
+  type: TabType;
+  // query tab fields
   sql: string;
   result: QueryResult | null;
   isExecuting: boolean;
   error: string | null;
+  // table tab fields
+  database?: string;
+  table?: string;
 }
 
-export type BottomTab = "results" | "messages";
-export type StructureTab = "columns" | "indexes" | "foreign_keys" | "create_sql";
+export type BottomTab = "data" | "results" | "messages";
+export type TableViewTab = "data" | "columns" | "indexes" | "foreign_keys" | "create_sql";
+
+export interface ConnectionSession {
+  id: string;
+  connectionId: string;
+  connectionName: string;
+  connectionConfig: ConnectionConfig;
+  profileId: string | null;
+  selectedDatabase: string | null;
+  // Object browser
+  databases: string[];
+  expandedDbs: Set<string>;
+  tables: Record<string, { name: string; table_type: string }[]>;
+  expandedTables: Set<string>;
+  columns: Record<string, ColumnInfo[]>;
+  // Query tabs
+  queryTabs: QueryTab[];
+  activeTabId: string | null;
+  activeBottomTab: BottomTab;
+  // Data preview (single click on table)
+  dataResult: QueryResult | null;
+  dataTableName: string | null;
+}
