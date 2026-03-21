@@ -64,7 +64,7 @@ export function ResultsGrid() {
   const {
     queryTabs, activeTabId, activeBottomTab, setActiveBottomTab,
     dataResult, dataTableName, dataDatabase, dataTable, dataColumns, dataPrimaryKeys,
-    activeConnectionId, setDataResult, setColumns,
+    activeConnectionId, setDataResult, setColumns, activeSessionId,
   } = useAppStore();
 
   const activeTab = queryTabs.find((t) => t.id === activeTabId);
@@ -149,6 +149,7 @@ export function ResultsGrid() {
           <>
             {dataResult && dataResult.columns.length > 0 && dataDatabase && dataTable && dataColumns && activeConnectionId ? (
               <EditableDataGrid
+                key={`${activeSessionId}-${dataDatabase}-${dataTable}`}
                 result={dataResult}
                 database={dataDatabase}
                 table={dataTable}
@@ -175,7 +176,7 @@ export function ResultsGrid() {
               <div style={{ padding: 12, color: "var(--text-muted)" }}>Executing…</div>
             )}
             {!activeTab?.isExecuting && queryResult && queryResult.columns.length > 0 && (
-              <DataGrid result={queryResult} />
+              <DataGrid key={`${activeSessionId}-${activeTabId}`} result={queryResult} />
             )}
             {!activeTab?.isExecuting && queryResult && queryResult.columns.length === 0 && (
               <div style={{ padding: 12, color: "var(--text-muted)" }}>

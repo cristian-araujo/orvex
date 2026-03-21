@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, CellValueChangedEvent, CellClassParams, CellDoubleClickedEvent, GridApi } from "ag-grid-community";
+import type { ColDef, CellValueChangedEvent, CellClassParams, CellDoubleClickedEvent, CellKeyDownEvent, GridApi } from "ag-grid-community";
 import { themeAlpine, colorSchemeDark } from "ag-grid-community";
 import { invoke } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -20,6 +20,13 @@ interface JsonEditorState {
   column: string;
   text: string;
   parseError: string | null;
+}
+
+interface TextEditorState {
+  rowIndex: number;
+  column: string;
+  text: string;
+  nullable: boolean;
 }
 
 interface EditableDataGridProps {
@@ -47,6 +54,11 @@ function isColumnEditable(col: ColumnInfo, isInsertedRow: boolean): boolean {
 
 function isJsonColumn(col: ColumnInfo): boolean {
   return col.column_type.toLowerCase() === "json";
+}
+
+function isTextColumn(col: ColumnInfo): boolean {
+  const t = col.column_type.toLowerCase();
+  return t === "text" || t === "tinytext" || t === "mediumtext" || t === "longtext";
 }
 
 function parseEditedValue(raw: string | null | undefined, col: ColumnInfo): unknown {
@@ -112,6 +124,7 @@ export function EditableDataGrid({
   const [showNoPkWarning, setShowNoPkWarning] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [jsonEditor, setJsonEditor] = useState<JsonEditorState | null>(null);
+  const [textEditor, setTextEditor] = useState<TextEditorState | null>(null);
 
   // Reset edit state when the underlying data changes (user clicked a different table)
   useEffect(() => {
@@ -120,6 +133,7 @@ export function EditableDataGrid({
     setDeletedIndices(new Set());
     setApplyError(null);
     setJsonEditor(null);
+    setTextEditor(null);
   }, [result]);
 
   const hasPk = primaryKeys.length > 0;
@@ -155,6 +169,8 @@ export function EditableDataGrid({
     const dataCols: ColDef[] = result.columns.map((colName) => {
       const colInfo = columnInfos.find((c) => c.field === colName);
       const isJson = colInfo ? isJsonColumn(colInfo) : false;
+      const isText = colInfo ? isTextColumn(colInfo) : false;
+      const usesModal = isJson || isText;
       return {
         field: colName,
         headerName: colName,
@@ -162,8 +178,8 @@ export function EditableDataGrid({
         filter: true,
         resizable: true,
         minWidth: 80,
-        // JSON columns open modal on double-click instead of inline edit
-        editable: isJson ? false : (params: { node: { data: Record<string, unknown> } }) => {
+        // JSON and TEXT columns open modal on double-click instead of inline edit
+        editable: usesModal ? false : (params: { node: { data: Record<string, unknown> } }) => {
           if (!colInfo) return true;
           const rowIdx = params.node.data.__rowIndex as number;
           const isInserted = rowIdx >= originalRowCount;
@@ -188,8 +204,8 @@ export function EditableDataGrid({
           if (params.value === null || params.value === undefined) {
             return { ...base, fontStyle: "italic", color: "var(--text-muted)" };
           }
-          // JSON columns get a subtle indicator
-          if (isJson) {
+          // JSON and TEXT columns get a subtle indicator (opens modal on double-click)
+          if (usesModal) {
             return { ...base, cursor: "pointer", color: "var(--accent, #4fc1ff)" };
           }
           return base;
@@ -202,20 +218,27 @@ export function EditableDataGrid({
     return dataCols;
   }, [result.columns, columnInfos, originalRowCount, deletedIndices, editedCells]);
 
-  // Double-click handler for JSON columns
+  // Double-click handler for JSON and TEXT columns — opens modal editor
   const onCellDoubleClicked = useCallback((event: CellDoubleClickedEvent) => {
     const col = event.colDef.field;
     if (!col) return;
     const colInfo = columnInfos.find((c) => c.field === col);
-    if (!colInfo || !isJsonColumn(colInfo)) return;
+    if (!colInfo) return;
 
     const rowIdx = event.data.__rowIndex as number;
     if (deletedIndices.has(rowIdx)) return;
+    if (!isColumnEditable(colInfo, rowIdx >= originalRowCount)) return;
 
     const currentValue = event.data[col];
-    const { text } = tryFormatJson(currentValue);
-    setJsonEditor({ rowIndex: rowIdx, column: col, text, parseError: null });
-  }, [columnInfos, deletedIndices]);
+
+    if (isJsonColumn(colInfo)) {
+      const { text } = tryFormatJson(currentValue);
+      setJsonEditor({ rowIndex: rowIdx, column: col, text, parseError: null });
+    } else if (isTextColumn(colInfo)) {
+      const text = currentValue === null || currentValue === undefined ? "" : String(currentValue);
+      setTextEditor({ rowIndex: rowIdx, column: col, text, nullable: colInfo.nullable });
+    }
+  }, [columnInfos, deletedIndices, originalRowCount]);
 
   // Save JSON from modal
   const handleJsonSave = useCallback(() => {
@@ -263,6 +286,52 @@ export function EditableDataGrid({
 
     setJsonEditor(null);
   }, [jsonEditor, originalRowCount, originalData]);
+
+  // Save text from modal
+  const handleTextSave = useCallback(() => {
+    if (!textEditor) return;
+
+    const { rowIndex, column, text, nullable } = textEditor;
+    const newValue = text === "" && nullable ? null : text;
+
+    if (rowIndex >= originalRowCount) {
+      const insertIdx = rowIndex - originalRowCount;
+      setInsertedRows((prev) => {
+        const next = [...prev];
+        next[insertIdx] = { ...next[insertIdx], [column]: newValue };
+        return next;
+      });
+    } else {
+      const key = `${rowIndex}:${column}`;
+      const originalValue = originalData[rowIndex][column];
+
+      setEditedCells((prev) => {
+        const next = new Map(prev);
+        if (newValue === originalValue || (newValue !== null && newValue === String(originalValue))) {
+          next.delete(key);
+        } else {
+          next.set(key, { rowIndex, column, originalValue, newValue });
+        }
+        return next;
+      });
+    }
+
+    setTextEditor(null);
+  }, [textEditor, originalRowCount, originalData]);
+
+  // Ctrl+C / Cmd+C copies focused cell value when not in edit mode
+  const onCellKeyDown = useCallback((event: CellKeyDownEvent) => {
+    const keyEvent = event.event as KeyboardEvent | null;
+    if (!keyEvent) return;
+    if ((keyEvent.ctrlKey || keyEvent.metaKey) && keyEvent.key === "c") {
+      // Don't interfere with native copy when editing a cell
+      if (event.api.getEditingCells().length > 0) return;
+      keyEvent.preventDefault();
+      const value = event.value;
+      const text = value === null || value === undefined ? "" : String(value);
+      navigator.clipboard.writeText(text).catch(console.error);
+    }
+  }, []);
 
   const onCellValueChanged = useCallback((event: CellValueChangedEvent) => {
     const rowIdx = event.data.__rowIndex as number;
@@ -516,6 +585,7 @@ export function EditableDataGrid({
           headerHeight={28}
           stopEditingWhenCellsLoseFocus={true}
           onCellValueChanged={onCellValueChanged}
+          onCellKeyDown={onCellKeyDown}
           onCellDoubleClicked={onCellDoubleClicked}
           rowSelection={{ mode: "multiRow", checkboxes: true, headerCheckbox: true }}
           suppressCellFocus={false}
@@ -537,6 +607,7 @@ export function EditableDataGrid({
             background: "rgba(0,0,0,0.4)",
           }}
           onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => { if (e.key === "Escape") setJsonEditor(null); }}
         >
           <div
             style={{
@@ -617,6 +688,86 @@ export function EditableDataGrid({
                 Cancel
               </button>
               <button className="btn-primary" onClick={handleJsonSave}>
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Text Editor Modal */}
+      {textEditor && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.4)",
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => { if (e.key === "Escape") setTextEditor(null); }}
+        >
+          <div
+            style={{
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              padding: 16,
+              width: 560,
+              maxHeight: "80vh",
+              display: "flex",
+              flexDirection: "column",
+              gap: 10,
+              boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-bright)" }}>
+                Edit Text — {textEditor.column}
+              </span>
+              <button
+                className="btn-secondary"
+                style={{ fontSize: 10, padding: "2px 8px" }}
+                onClick={() => setTextEditor({ ...textEditor, text: "" })}
+              >
+                Clear
+              </button>
+            </div>
+            <textarea
+              value={textEditor.text}
+              onChange={(e) => setTextEditor({ ...textEditor, text: e.target.value })}
+              spellCheck={false}
+              style={{
+                width: "100%",
+                minHeight: 260,
+                maxHeight: "60vh",
+                resize: "vertical",
+                fontFamily: "monospace",
+                fontSize: 12,
+                lineHeight: 1.5,
+                padding: 10,
+                background: "var(--bg-surface)",
+                color: "var(--text)",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                outline: "none",
+                tabSize: 2,
+              }}
+            />
+            {textEditor.nullable && textEditor.text === "" && (
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                Empty text will be saved as NULL
+              </span>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button className="btn-secondary" onClick={() => setTextEditor(null)}>
+                Cancel
+              </button>
+              <button className="btn-primary" onClick={handleTextSave}>
                 Save
               </button>
             </div>

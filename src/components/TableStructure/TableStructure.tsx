@@ -48,7 +48,7 @@ interface Props {
 }
 
 export function TableStructure({ database, table }: Props) {
-  const { activeConnectionId } = useAppStore();
+  const { activeConnectionId, activeSessionId } = useAppStore();
   const [activeTab, setActiveTab] = useState<TableViewTab>("data");
   const [structure, setStructure] = useState<TableStructureType | null>(null);
   const [dataResult, setDataResult] = useState<QueryResult | null>(null);
@@ -204,6 +204,7 @@ export function TableStructure({ database, table }: Props) {
               {!isLoading && !error && dataResult && colDefs.length > 0 && (
                 <div style={{ position: "absolute", inset: 0 }}>
                   <AgGridReact
+                    key={`${activeSessionId}-${database}-${table}`}
                     theme={darkTheme}
                     columnDefs={colDefs}
                     rowData={rowData}
