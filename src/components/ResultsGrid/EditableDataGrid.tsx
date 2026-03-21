@@ -37,6 +37,9 @@ interface EditableDataGridProps {
   primaryKeys: string[];
   connectionId: string;
   onDataReload: () => void;
+  onFilterChanged?: (api: GridApi) => void;
+  quickFilterText?: string;
+  onGridReady?: (api: GridApi) => void;
 }
 
 function isColumnEditable(col: ColumnInfo, isInsertedRow: boolean): boolean {
@@ -113,6 +116,9 @@ export function EditableDataGrid({
   primaryKeys,
   connectionId,
   onDataReload,
+  onFilterChanged,
+  quickFilterText,
+  onGridReady,
 }: EditableDataGridProps) {
   const gridRef = useRef<AgGridReact>(null);
   const originalRowCount = result.rows.length;
@@ -580,13 +586,21 @@ export function EditableDataGrid({
           theme={darkTheme}
           columnDefs={colDefs}
           rowData={rowData}
-          defaultColDef={{ sortable: true, filter: true, resizable: true }}
+          defaultColDef={{
+            sortable: true,
+            filter: true,
+            resizable: true,
+            filterParams: { buttons: ["apply", "reset"], closeOnApply: true },
+          }}
           rowHeight={24}
           headerHeight={28}
           stopEditingWhenCellsLoseFocus={true}
           onCellValueChanged={onCellValueChanged}
           onCellKeyDown={onCellKeyDown}
           onCellDoubleClicked={onCellDoubleClicked}
+          onFilterChanged={(e) => onFilterChanged?.(e.api)}
+          onGridReady={(e) => onGridReady?.(e.api)}
+          quickFilterText={quickFilterText}
           rowSelection={{ mode: "multiRow", checkboxes: true, headerCheckbox: true }}
           suppressCellFocus={false}
           enableCellTextSelection={false}
