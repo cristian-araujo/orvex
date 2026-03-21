@@ -129,3 +129,14 @@ fn load_connections_from_path(path: &std::path::Path) -> Vec<ConnectionProfile> 
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
+
+#[tauri::command]
+pub fn export_connections(path: String, data: String) -> Result<(), String> {
+    fs::write(&path, data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn import_connections(path: String) -> Result<Vec<ConnectionProfile>, String> {
+    let json = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&json).map_err(|e| format!("Invalid connection file: {}", e))
+}
