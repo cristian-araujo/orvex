@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../../store/useAppStore";
+import type { ConnectionConfig } from "../../types";
 
 interface TabContextMenu {
   x: number;
@@ -8,8 +10,25 @@ interface TabContextMenu {
 }
 
 export function ConnectionTabs() {
-  const { sessions, activeSessionId, switchSession, closeSession, setShowConnectionDialog, setShowColorEditor } = useAppStore();
+  const { sessions, activeSessionId, switchSession, closeSession, setShowConnectionDialog, setShowColorEditor, updateSessionConnectionId } = useAppStore();
   const [contextMenu, setContextMenu] = useState<TabContextMenu | null>(null);
+  const [reconnecting, setReconnecting] = useState<string | null>(null);
+
+  const handleReconnect = async (sessionId: string) => {
+    const session = sessions.find((s) => s.id === sessionId);
+    if (!session || session.connectionId) return;
+    setReconnecting(sessionId);
+    try {
+      const connectionId = await invoke<string>("connect", {
+        config: session.connectionConfig as ConnectionConfig,
+      });
+      updateSessionConnectionId(sessionId, connectionId);
+    } catch (e) {
+      console.error("Reconnect failed:", e);
+    } finally {
+      setReconnecting(null);
+    }
+  };
 
   useEffect(() => {
     const handler = () => setContextMenu(null);
@@ -34,10 +53,13 @@ export function ConnectionTabs() {
       >
         {sessions.map((session) => {
           const isActive = session.id === activeSessionId;
+          const isConnected = !!session.connectionId;
+          const isSessionReconnecting = reconnecting === session.id;
           return (
             <div
               key={session.id}
               onClick={() => switchSession(session.id)}
+              onDoubleClick={() => { if (!isConnected && !isSessionReconnecting) handleReconnect(session.id); }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -64,8 +86,11 @@ export function ConnectionTabs() {
               onMouseLeave={(e) => {
                 if (!isActive) (e.currentTarget as HTMLDivElement).style.background = "transparent";
               }}
+              title={!isConnected ? "Disconnected — double-click or right-click to reconnect" : session.connectionName}
             >
-              <span style={{ color: "var(--success)", fontSize: 8 }}>⬤</span>
+              <span style={{ color: isSessionReconnecting ? "var(--warning)" : isConnected ? "var(--success)" : "var(--danger)", fontSize: 8 }}>
+                {isSessionReconnecting ? "◌" : "⬤"}
+              </span>
               <span>{session.connectionName}</span>
               <span
                 onClick={(e) => { e.stopPropagation(); closeSession(session.id); }}
@@ -119,22 +144,40 @@ export function ConnectionTabs() {
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          <div
-            onClick={() => { setShowColorEditor(true); setContextMenu(null); }}
-            style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
-            onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
-          >
-            Change Colors...
-          </div>
-          <div
-            onClick={() => { closeSession(contextMenu.sessionId); setContextMenu(null); }}
-            style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap", color: "var(--danger)" }}
-            onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
-          >
-            Disconnect
-          </div>
+          {(() => {
+            const ctxSession = sessions.find((s) => s.id === contextMenu.sessionId);
+            const ctxConnected = !!ctxSession?.connectionId;
+            return (
+              <>
+                {!ctxConnected && (
+                  <div
+                    onClick={() => { handleReconnect(contextMenu.sessionId); setContextMenu(null); }}
+                    style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap", color: "var(--success)" }}
+                    onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
+                    onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
+                  >
+                    Reconnect
+                  </div>
+                )}
+                <div
+                  onClick={() => { setShowColorEditor(true); setContextMenu(null); }}
+                  style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
+                  onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
+                  onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
+                >
+                  Change Colors...
+                </div>
+                <div
+                  onClick={() => { closeSession(contextMenu.sessionId); setContextMenu(null); }}
+                  style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap", color: "var(--danger)" }}
+                  onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
+                  onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
+                >
+                  {ctxConnected ? "Disconnect" : "Close"}
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
     </>
