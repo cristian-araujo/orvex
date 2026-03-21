@@ -7,6 +7,173 @@ use russh::keys::key;
 
 use crate::models::ConnectionConfig;
 
+/// Load a private key, trying russh-keys first and falling back to manual
+/// PEM decryption for formats that russh-keys doesn't support (e.g. keys
+/// encrypted with DES-EDE3-CBC or AES-256-CBC).
+fn load_private_key(path: &str, passphrase: Option<&str>) -> Result<key::KeyPair, String> {
+    // Try russh-keys first (handles OpenSSH format, unencrypted PEM, AES-128-CBC PEM)
+    match russh_keys::load_secret_key(path, passphrase) {
+        Ok(kp) => return Ok(kp),
+        Err(_) => {}
+    }
+
+    // Fallback: manually decrypt PEM-encrypted legacy keys
+    let pem_data = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read key file: {}", e))?;
+
+    decrypt_pem_legacy(&pem_data, passphrase)
+}
+
+/// Decrypt a PEM legacy encrypted private key (Proc-Type: 4,ENCRYPTED)
+/// Supports DES-EDE3-CBC and AES-128-CBC/AES-256-CBC
+fn decrypt_pem_legacy(pem: &str, passphrase: Option<&str>) -> Result<key::KeyPair, String> {
+    use data_encoding::HEXLOWER_PERMISSIVE;
+
+    let password = passphrase.ok_or("Key is encrypted but no passphrase provided")?;
+
+    let mut cipher_name = None;
+    let mut iv_hex = None;
+    let mut base64_data = String::new();
+    let mut in_body = false;
+    let mut header_type = None;
+
+    for line in pem.lines() {
+        if line.starts_with("-----BEGIN ") {
+            header_type = Some(line.to_string());
+            in_body = true;
+            continue;
+        }
+        if line.starts_with("-----END ") {
+            break;
+        }
+        if !in_body { continue; }
+
+        if line.starts_with("Proc-Type:") {
+            continue;
+        }
+        if line.starts_with("DEK-Info:") {
+            // DEK-Info: DES-EDE3-CBC,63E1151EF8A0C05B
+            let info = line.trim_start_matches("DEK-Info:").trim();
+            let parts: Vec<&str> = info.splitn(2, ',').collect();
+            if parts.len() == 2 {
+                cipher_name = Some(parts[0].to_string());
+                iv_hex = Some(parts[1].to_string());
+            }
+            continue;
+        }
+        if line.is_empty() { continue; }
+        base64_data.push_str(line);
+    }
+
+    let cipher = cipher_name.ok_or("Missing DEK-Info cipher in encrypted PEM key")?;
+    let iv_hex = iv_hex.ok_or("Missing IV in DEK-Info header")?;
+    let iv = HEXLOWER_PERMISSIVE.decode(iv_hex.as_bytes())
+        .map_err(|e| format!("Invalid IV hex: {}", e))?;
+
+    let encrypted = data_encoding::BASE64.decode(base64_data.as_bytes())
+        .map_err(|e| format!("Invalid base64 in PEM key: {}", e))?;
+
+    // Derive key using OpenSSL EVP_BytesToKey (MD5-based)
+    let decrypted = match cipher.as_str() {
+        "DES-EDE3-CBC" => {
+            let key = evp_bytes_to_key::<24>(password.as_bytes(), &iv[..8]);
+            decrypt_3des_cbc(&key, &iv, &encrypted)?
+        }
+        "AES-128-CBC" => {
+            let key = evp_bytes_to_key::<16>(password.as_bytes(), &iv[..8]);
+            decrypt_aes_cbc(&key, &iv, &encrypted)?
+        }
+        "AES-256-CBC" => {
+            let key = evp_bytes_to_key::<32>(password.as_bytes(), &iv[..8]);
+            decrypt_aes_cbc(&key, &iv, &encrypted)?
+        }
+        _ => return Err(format!("Unsupported PEM cipher: {}", cipher)),
+    };
+
+    // Re-encode as unencrypted PEM and let russh-keys parse the PKCS#1 DER
+    let b64 = data_encoding::BASE64.encode(&decrypted);
+    let pem_type = if header_type.as_deref() == Some("-----BEGIN RSA PRIVATE KEY-----") {
+        "RSA PRIVATE KEY"
+    } else if header_type.as_deref() == Some("-----BEGIN DSA PRIVATE KEY-----") {
+        "DSA PRIVATE KEY"
+    } else {
+        "PRIVATE KEY"
+    };
+
+    let mut unencrypted_pem = format!("-----BEGIN {}-----\n", pem_type);
+    for chunk in b64.as_bytes().chunks(64) {
+        unencrypted_pem.push_str(std::str::from_utf8(chunk).unwrap());
+        unencrypted_pem.push('\n');
+    }
+    unencrypted_pem.push_str(&format!("-----END {}-----\n", pem_type));
+
+    russh_keys::decode_secret_key(&unencrypted_pem, None)
+        .map_err(|e| format!("Failed to parse decrypted key: {}", e))
+}
+
+/// OpenSSL EVP_BytesToKey key derivation (MD5-based, no iteration count)
+fn evp_bytes_to_key<const N: usize>(password: &[u8], salt: &[u8]) -> [u8; N] {
+    use md5::{Md5, Digest};
+    let mut key = [0u8; N];
+    let mut offset = 0;
+    let mut prev_hash: Option<[u8; 16]> = None;
+
+    while offset < N {
+        let mut hasher = Md5::new();
+        if let Some(ref h) = prev_hash {
+            hasher.update(h);
+        }
+        hasher.update(password);
+        hasher.update(salt);
+        let hash: [u8; 16] = hasher.finalize().into();
+        let copy_len = std::cmp::min(16, N - offset);
+        key[offset..offset + copy_len].copy_from_slice(&hash[..copy_len]);
+        offset += copy_len;
+        prev_hash = Some(hash);
+    }
+    key
+}
+
+fn decrypt_3des_cbc(key: &[u8; 24], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+    use des::TdesEde3;
+    use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+    type Decryptor = cbc::Decryptor<TdesEde3>;
+
+    let iv_arr: [u8; 8] = iv[..8].try_into().map_err(|_| "Invalid IV length for 3DES")?;
+    let decryptor = Decryptor::new(key.into(), &iv_arr.into());
+    let mut buf = data.to_vec();
+    let decrypted = decryptor.decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .map_err(|_| "3DES decryption failed — wrong passphrase?".to_string())?;
+    Ok(decrypted.to_vec())
+}
+
+fn decrypt_aes_cbc(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+    use aes::Aes128;
+    use aes::Aes256;
+    use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+
+    let iv_arr: [u8; 16] = iv[..16].try_into().map_err(|_| "Invalid IV length for AES")?;
+    let mut buf = data.to_vec();
+
+    match key.len() {
+        16 => {
+            type Decryptor = cbc::Decryptor<Aes128>;
+            let decryptor = Decryptor::new(key.into(), &iv_arr.into());
+            let decrypted = decryptor.decrypt_padded_mut::<Pkcs7>(&mut buf)
+                .map_err(|_| "AES-128 decryption failed — wrong passphrase?".to_string())?;
+            Ok(decrypted.to_vec())
+        }
+        32 => {
+            type Decryptor = cbc::Decryptor<Aes256>;
+            let decryptor = Decryptor::new(key.into(), &iv_arr.into());
+            let decrypted = decryptor.decrypt_padded_mut::<Pkcs7>(&mut buf)
+                .map_err(|_| "AES-256 decryption failed — wrong passphrase?".to_string())?;
+            Ok(decrypted.to_vec())
+        }
+        _ => Err(format!("Unsupported AES key length: {}", key.len())),
+    }
+}
+
 /// Minimal SSH client handler that accepts all host keys.
 struct ClientHandler;
 
@@ -57,8 +224,7 @@ impl SshTunnel {
                     .as_deref()
                     .ok_or("SSH key path not provided")?;
                 let passphrase = ssh_passphrase.as_deref();
-                let key_pair = russh_keys::load_secret_key(key_path, passphrase)
-                    .map_err(|e| format!("Failed to load SSH key: {}", e))?;
+                let key_pair = load_private_key(key_path, passphrase)?;
                 session
                     .authenticate_publickey(&ssh_user, Arc::new(key_pair))
                     .await

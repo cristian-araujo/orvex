@@ -12,7 +12,7 @@ export function FilePickerField({ label, value, onChange, filters, disabled }: P
   const browse = async () => {
     const selected = await open({
       multiple: false,
-      filters: filters ?? [{ name: "All Files", extensions: ["*"] }],
+      ...(filters && { filters }),
     });
     if (selected) {
       onChange(selected as string);

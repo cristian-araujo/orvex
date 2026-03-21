@@ -6,7 +6,9 @@ interface Props {
   onFormChange: (key: keyof ConnectionConfig, value: string | number | boolean) => void;
 }
 
-const SSH_KEY_FILTERS = [{ name: "Key Files", extensions: ["pem", "ppk", "key", "pub", "id_rsa", "id_ed25519"] }];
+// No filters — SSH private keys typically have no extension (id_rsa, id_ed25519, etc.)
+// Passing filters on GTK/Linux hides extensionless files even with "*"
+const SSH_KEY_FILTERS = undefined;
 
 export function SSHTab({ form, onFormChange }: Props) {
   const enabled = form.ssh_enabled ?? false;
