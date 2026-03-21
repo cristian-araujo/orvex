@@ -1,9 +1,10 @@
 import { useRef, useCallback, useEffect } from "react";
 import MonacoEditor, { type OnMount } from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useAppStore } from "../../store/useAppStore";
 import type { editor } from "monaco-editor";
-import { KeyCode } from "monaco-editor";
+import { KeyCode, KeyMod } from "monaco-editor";
 
 export function SqlEditor() {
   const { queryTabs, activeTabId, updateTabSql } = useAppStore();
@@ -54,6 +55,71 @@ export function SqlEditor() {
 
   const handleMount: OnMount = (editorInstance) => {
     editorRef.current = editorInstance;
+
+    // Override clipboard for WebKitGTK — document.execCommand('cut'/'copy'/'paste') doesn't work.
+    // 1. Register custom clipboard actions with context menu entries
+    editorInstance.addAction({
+      id: "tauri-paste",
+      label: "Paste",
+      keybindings: [KeyMod.CtrlCmd | KeyCode.KeyV],
+      contextMenuGroupId: "9_cutcopypaste",
+      contextMenuOrder: 3,
+      run: async (ed) => {
+        try {
+          const text = await readText();
+          ed.trigger("clipboard", "type", { text });
+        } catch {
+          // clipboard not available
+        }
+      },
+    });
+
+    editorInstance.addAction({
+      id: "tauri-copy",
+      label: "Copy",
+      keybindings: [KeyMod.CtrlCmd | KeyCode.KeyC],
+      contextMenuGroupId: "9_cutcopypaste",
+      contextMenuOrder: 2,
+      run: async (ed) => {
+        const sel = ed.getSelection();
+        if (sel && !sel.isEmpty()) {
+          const text = ed.getModel()?.getValueInRange(sel) ?? "";
+          writeText(text).catch(() => {});
+        }
+      },
+    });
+
+    editorInstance.addAction({
+      id: "tauri-cut",
+      label: "Cut",
+      keybindings: [KeyMod.CtrlCmd | KeyCode.KeyX],
+      contextMenuGroupId: "9_cutcopypaste",
+      contextMenuOrder: 1,
+      run: async (ed) => {
+        const sel = ed.getSelection();
+        if (sel && !sel.isEmpty()) {
+          const text = ed.getModel()?.getValueInRange(sel) ?? "";
+          writeText(text).catch(() => {});
+          ed.executeEdits("cut", [{ range: sel, text: "" }]);
+        }
+      },
+    });
+
+    // 2. Remove built-in clipboard items from context menu by patching the contribution
+    const clipboardIds = new Set([
+      "editor.action.clipboardCutAction",
+      "editor.action.clipboardCopyAction",
+      "editor.action.clipboardPasteAction",
+    ]);
+    const contextMenuContrib = editorInstance.getContribution("editor.contrib.contextmenu") as any;
+    if (contextMenuContrib?._getMenuActions) {
+      const origGetMenuActions = contextMenuContrib._getMenuActions.bind(contextMenuContrib);
+      contextMenuContrib._getMenuActions = (...args: unknown[]) => {
+        const actions = origGetMenuActions(...args);
+        return actions.filter((a: any) => !clipboardIds.has(a.id));
+      };
+    }
+
     // Los comandos invocan el ref, que siempre apunta a la función actual
     editorInstance.addCommand(KeyCode.F9, () => executeQueryRef.current());
     editorInstance.addCommand(KeyCode.F5, () => executeQueryRef.current());
