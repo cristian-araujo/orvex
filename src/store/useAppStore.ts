@@ -13,7 +13,7 @@ import type {
 
 // --- Projection helpers ---
 
-function projectSession(session: ConnectionSession | undefined) {
+export function projectSession(session: ConnectionSession | undefined) {
   if (!session) {
     return {
       activeConnectionId: null as string | null,
@@ -26,6 +26,8 @@ function projectSession(session: ConnectionSession | undefined) {
       tables: {} as Record<string, { name: string; table_type: string }[]>,
       expandedTables: new Set<string>(),
       columns: {} as Record<string, ColumnInfo[]>,
+      dbFilter: "",
+      tableFilter: "",
       queryTabs: [] as QueryTab[],
       activeTabId: null as string | null,
       activeBottomTab: "results" as BottomTab,
@@ -48,6 +50,8 @@ function projectSession(session: ConnectionSession | undefined) {
     tables: session.tables,
     expandedTables: session.expandedTables,
     columns: session.columns,
+    dbFilter: session.dbFilter,
+    tableFilter: session.tableFilter,
     queryTabs: session.queryTabs,
     activeTabId: session.activeTabId,
     activeBottomTab: session.activeBottomTab,
@@ -83,6 +87,7 @@ interface AppState {
   // Sessions
   sessions: ConnectionSession[];
   activeSessionId: string | null;
+  isRestoring: boolean;
 
   // Projected from active session (backward compat for components)
   activeConnectionId: string | null;
@@ -95,6 +100,8 @@ interface AppState {
   tables: Record<string, { name: string; table_type: string }[]>;
   expandedTables: Set<string>;
   columns: Record<string, ColumnInfo[]>;
+  dbFilter: string;
+  tableFilter: string;
   queryTabs: QueryTab[];
   activeTabId: string | null;
   activeBottomTab: BottomTab;
@@ -109,6 +116,9 @@ interface AppState {
   createSession: (connectionId: string, name: string, config: ConnectionConfig, profileId?: string) => void;
   switchSession: (sessionId: string) => void;
   closeSession: (sessionId: string) => Promise<void>;
+  restoreSessions: (sessions: ConnectionSession[], activeSessionId: string | null) => void;
+  updateSessionConnectionId: (sessionId: string, connectionId: string) => void;
+  setIsRestoring: (restoring: boolean) => void;
 
   // Global actions
   setSavedConnections: (connections: ConnectionProfile[]) => void;
@@ -123,6 +133,8 @@ interface AppState {
   setTables: (db: string, tables: { name: string; table_type: string }[]) => void;
   setExpandedTables: (expandedTables: Set<string>) => void;
   setColumns: (key: string, cols: ColumnInfo[]) => void;
+  setDbFilter: (filter: string) => void;
+  setTableFilter: (filter: string) => void;
   addQueryTab: (title?: string, sql?: string) => string;
   addTableTab: (database: string, table: string) => string;
   closeQueryTab: (id: string) => void;
@@ -144,6 +156,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Sessions
   sessions: [],
   activeSessionId: null,
+  isRestoring: false,
 
   // Projected (initially empty)
   activeConnectionId: null,
@@ -156,6 +169,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   tables: {},
   expandedTables: new Set(),
   columns: {},
+  dbFilter: "",
+  tableFilter: "",
   queryTabs: [],
   activeTabId: null,
   activeBottomTab: "results",
@@ -183,6 +198,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       tables: {},
       expandedTables: new Set(),
       columns: {},
+      dbFilter: "",
+      tableFilter: "",
       queryTabs: [{ id: tabId, title: "Query 1", type: "query", sql: "", result: null, isExecuting: false, error: null }],
       activeTabId: tabId,
       activeBottomTab: "results",
@@ -238,6 +255,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
+  restoreSessions: (sessions, activeSessionId) => {
+    const active = sessions.find((s) => s.id === activeSessionId);
+    set({
+      isRestoring: true,
+      sessions,
+      activeSessionId,
+      showConnectionDialog: false,
+      ...projectSession(active),
+    });
+  },
+
+  updateSessionConnectionId: (sessionId, connectionId) => {
+    set((s) => {
+      const sessions = s.sessions.map((sess) =>
+        sess.id === sessionId ? { ...sess, connectionId } : sess,
+      );
+      const active = sessions.find((sess) => sess.id === s.activeSessionId);
+      return { sessions, ...projectSession(active) };
+    });
+  },
+
+  setIsRestoring: (restoring) => set({ isRestoring: restoring }),
+
   // --- Global actions ---
 
   setSavedConnections: (connections) => set({ savedConnections: connections }),
@@ -282,6 +322,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => withSessionUpdate(s, (sess) => ({
       columns: { ...sess.columns, [key]: cols },
     }))),
+
+  setDbFilter: (filter) =>
+    set((s) => withSessionUpdate(s, () => ({ dbFilter: filter }))),
+
+  setTableFilter: (filter) =>
+    set((s) => withSessionUpdate(s, () => ({ tableFilter: filter }))),
 
   addQueryTab: (title, sql = "") => {
     const id = uuidv4();

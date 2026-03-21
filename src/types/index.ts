@@ -118,6 +118,8 @@ export interface ConnectionSession {
   tables: Record<string, { name: string; table_type: string }[]>;
   expandedTables: Set<string>;
   columns: Record<string, ColumnInfo[]>;
+  dbFilter: string;
+  tableFilter: string;
   // Query tabs
   queryTabs: QueryTab[];
   activeTabId: string | null;
@@ -151,4 +153,34 @@ export interface ApplyEditsResult {
   success: boolean;
   rows_affected: number;
   message: string;
+}
+
+// --- Session persistence ---
+
+export interface PersistedQueryTab {
+  id: string;
+  title: string;
+  type: TabType;
+  sql: string;
+  database?: string;
+  table?: string;
+}
+
+export interface PersistedSession {
+  id: string;
+  connectionName: string;
+  connectionConfig: ConnectionConfig;
+  profileId: string | null;
+  selectedDatabase: string | null;
+  expandedDbs: string[];
+  expandedTables: string[];
+  queryTabs: PersistedQueryTab[];
+  activeTabId: string | null;
+  activeBottomTab: BottomTab;
+}
+
+export interface PersistedSessionState {
+  version: 1;
+  activeSessionId: string | null;
+  sessions: PersistedSession[];
 }

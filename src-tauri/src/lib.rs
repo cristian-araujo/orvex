@@ -7,12 +7,14 @@ use db::manager::ConnectionManager;
 use commands::connection::*;
 use commands::query::*;
 use commands::schema::*;
+use commands::session::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init());
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init());
 
     #[cfg(debug_assertions)]
     {
@@ -29,6 +31,8 @@ pub fn run() {
             save_connection,
             get_saved_connections,
             delete_connection,
+            export_connections,
+            import_connections,
             // Query
             execute_query,
             get_table_data,
@@ -38,6 +42,9 @@ pub fn run() {
             get_tables,
             get_columns,
             get_table_structure,
+            // Session
+            save_session_state,
+            load_session_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

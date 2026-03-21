@@ -35,6 +35,10 @@ export function ObjectBrowser() {
     updateActiveConnectionConfig,
     setDataResult,
     dataTableName,
+    dbFilter,
+    tableFilter,
+    setDbFilter,
+    setTableFilter,
   } = useAppStore();
 
   // Per-connection Object Browser colors
@@ -47,9 +51,6 @@ export function ObjectBrowser() {
   // Draft colors for live preview without persisting
   const [draftColors, setDraftColors] = useState<Record<string, string>>({});
   const [originalColors, setOriginalColors] = useState<Record<string, string>>({});
-  // Filter state: persists independently for each level
-  const [dbFilter, setDbFilter] = useState("");
-  const [tableFilter, setTableFilter] = useState("");
   const filterInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -64,6 +65,45 @@ export function ObjectBrowser() {
       .then(setDatabases)
       .catch(console.error);
   }, [activeConnectionId]);
+
+  // Auto-fetch tables/columns for restored expanded nodes
+  const restoredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeConnectionId || databases.length === 0) return;
+    if (restoredRef.current === activeConnectionId) return;
+    restoredRef.current = activeConnectionId;
+
+    const fetchExpandedData = async () => {
+      for (const db of expandedDbs) {
+        if (!databases.includes(db) || tables[db]) continue;
+        try {
+          const t = await invoke<{ name: string; table_type: string }[]>("get_tables", {
+            connectionId: activeConnectionId,
+            database: db,
+          });
+          setTables(db, t);
+          for (const entry of t) {
+            const key = `${db}.${entry.name}`;
+            if (expandedTables.has(key) && !columns[key]) {
+              try {
+                const cols = await invoke<import("../../types").ColumnInfo[]>("get_columns", {
+                  connectionId: activeConnectionId,
+                  database: db,
+                  table: entry.name,
+                });
+                setColumns(key, cols);
+              } catch (e) {
+                console.error(`Failed to load columns for ${key}:`, e);
+              }
+            }
+          }
+        } catch (e) {
+          console.error(`Failed to load tables for ${db}:`, e);
+        }
+      }
+    };
+    fetchExpandedData();
+  }, [activeConnectionId, databases]);
 
   // Initialize draft colors when editor opens
   useEffect(() => {

@@ -1,5 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
+import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "./store/useAppStore";
 import { ConnectionDialog } from "./components/ConnectionManager/ConnectionDialog";
 import { ObjectBrowser } from "./components/ObjectBrowser/ObjectBrowser";
@@ -9,6 +10,9 @@ import { TableStructure } from "./components/TableStructure/TableStructure";
 import { Toolbar } from "./components/Layout/Toolbar";
 import { ConnectionTabs } from "./components/Layout/ConnectionTabs";
 import { StatusBar } from "./components/Layout/StatusBar";
+import { loadPersistedState, deserializeSession, startAutoSave, forceSave } from "./store/sessionPersistence";
+import { useClipboardFix } from "./hooks/useClipboardFix";
+import type { ConnectionConfig } from "./types";
 
 function QueryTabs() {
   const {
@@ -167,7 +171,67 @@ function ActiveTabContent() {
 
 export default function App() {
   const { showConnectionDialog, activeConnectionId, sessions, setShowConnectionDialog } = useAppStore();
+  const [appReady, setAppReady] = useState(false);
+  const initRef = useRef(false);
 
+  // Fix clipboard operations on Linux/WebKitGTK
+  useClipboardFix();
+
+  // Session restoration on mount
+  useEffect(() => {
+    if (initRef.current) return;
+    initRef.current = true;
+
+    async function init() {
+      const persisted = await loadPersistedState();
+
+      if (!persisted || persisted.sessions.length === 0) {
+        setAppReady(true);
+        startAutoSave();
+        return;
+      }
+
+      // Deserialize and hydrate store
+      const restoredSessions = persisted.sessions.map(deserializeSession);
+      useAppStore.getState().restoreSessions(restoredSessions, persisted.activeSessionId);
+
+      // Reconnect each session in parallel
+      const results = await Promise.allSettled(
+        restoredSessions.map(async (session) => {
+          const connectionId = await invoke<string>("connect", {
+            config: session.connectionConfig as ConnectionConfig,
+          });
+          useAppStore.getState().updateSessionConnectionId(session.id, connectionId);
+          return session.id;
+        }),
+      );
+
+      // Log failed reconnections — sessions stay with connectionId="" (disconnected)
+      for (let i = 0; i < results.length; i++) {
+        if (results[i].status === "rejected") {
+          console.error(
+            `Failed to reconnect session ${restoredSessions[i].connectionName}:`,
+            (results[i] as PromiseRejectedResult).reason,
+          );
+        }
+      }
+
+      useAppStore.getState().setIsRestoring(false);
+      startAutoSave();
+      setAppReady(true);
+    }
+
+    init();
+  }, []);
+
+  // Force save on window close
+  useEffect(() => {
+    const handler = () => { forceSave(); };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, []);
+
+  // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.key === "t") {
@@ -183,6 +247,24 @@ export default function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
+
+  // Loading screen while restoring sessions
+  if (!appReady) {
+    return (
+      <div style={{
+        height: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexDirection: "column",
+        gap: 16,
+        color: "var(--text-muted)",
+      }}>
+        <div style={{ fontSize: 48 }}>🐬</div>
+        <div style={{ fontSize: 14 }}>Reconnecting sessions...</div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
