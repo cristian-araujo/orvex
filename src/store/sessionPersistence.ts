@@ -87,6 +87,10 @@ export function deserializeSession(
     dataTable: null,
     dataColumns: null,
     dataPrimaryKeys: [],
+    isLoadingData: false,
+    dataPage: 0,
+    dataPageSize: 1000,
+    dataTotalRows: null,
   };
 }
 

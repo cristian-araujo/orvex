@@ -1,12 +1,16 @@
-import { useAppStore } from "../../store/useAppStore";
+import { useShallow } from "zustand/react/shallow";
+import { useAppStore, getActiveSession } from "../../store/useAppStore";
 
 export function Toolbar() {
-  const {
-    activeConnectionId,
-    activeSessionId,
-    setShowConnectionDialog,
-    closeSession,
-  } = useAppStore();
+  const { activeConnectionId, activeSessionId } = useAppStore(useShallow(s => {
+    const session = getActiveSession(s);
+    return {
+      activeConnectionId: session?.connectionId ?? null,
+      activeSessionId: s.activeSessionId,
+    };
+  }));
+  const setShowConnectionDialog = useAppStore(s => s.setShowConnectionDialog);
+  const closeSession = useAppStore(s => s.closeSession);
 
   const btnStyle = (disabled = false): React.CSSProperties => ({
     background: "var(--bg-surface)",

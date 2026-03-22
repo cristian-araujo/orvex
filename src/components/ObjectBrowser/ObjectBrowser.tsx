@@ -1,7 +1,8 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { HexColorPicker, HexColorInput } from "react-colorful";
-import { useAppStore } from "../../store/useAppStore";
+import { useShallow } from "zustand/react/shallow";
+import { useAppStore, getActiveSession } from "../../store/useAppStore";
 
 interface ContextMenu {
   x: number;
@@ -22,29 +23,61 @@ export function ObjectBrowser() {
     expandedTables,
     columns,
     selectedDatabase,
-    showColorEditor,
-    setDatabases,
-    toggleDb,
-    setTables,
-    setExpandedTables,
-    setColumns,
-    setSelectedDatabase,
-    setShowColorEditor,
-    addQueryTab,
-    addTableTab,
-    updateActiveConnectionConfig,
-    setDataResult,
     dataTableName,
     dbFilter,
     tableFilter,
-    setDbFilter,
-    setTableFilter,
-  } = useAppStore();
+  } = useAppStore(useShallow(s => {
+    const session = getActiveSession(s);
+    return {
+      activeConnectionId: session?.connectionId ?? null,
+      activeConnectionName: session?.connectionName ?? null,
+      activeConnectionConfig: session?.connectionConfig ?? null,
+      activeProfileId: session?.profileId ?? null,
+      databases: session?.databases ?? [],
+      expandedDbs: session?.expandedDbs ?? new Set<string>(),
+      tables: session?.tables ?? {},
+      expandedTables: session?.expandedTables ?? new Set<string>(),
+      columns: session?.columns ?? {},
+      selectedDatabase: session?.selectedDatabase ?? null,
+      dataTableName: session?.dataTableName ?? null,
+      dbFilter: session?.dbFilter ?? "",
+      tableFilter: session?.tableFilter ?? "",
+    };
+  }));
+  const showColorEditor = useAppStore(s => s.showColorEditor);
+  const {
+    setDatabases, toggleDb, setTables, setExpandedTables, setColumns,
+    setSelectedDatabase, setShowColorEditor, addQueryTab, addTableTab,
+    updateActiveConnectionConfig, setDataResult, setDbFilter, setTableFilter,
+    setLoadingData, setDataPage, setDataTotalRows,
+  } = useAppStore(useShallow(s => ({
+    setDatabases: s.setDatabases,
+    toggleDb: s.toggleDb,
+    setTables: s.setTables,
+    setExpandedTables: s.setExpandedTables,
+    setColumns: s.setColumns,
+    setSelectedDatabase: s.setSelectedDatabase,
+    setShowColorEditor: s.setShowColorEditor,
+    addQueryTab: s.addQueryTab,
+    addTableTab: s.addTableTab,
+    updateActiveConnectionConfig: s.updateActiveConnectionConfig,
+    setDataResult: s.setDataResult,
+    setDbFilter: s.setDbFilter,
+    setTableFilter: s.setTableFilter,
+    setLoadingData: s.setLoadingData,
+    setDataPage: s.setDataPage,
+    setDataTotalRows: s.setDataTotalRows,
+  })));
 
   // Per-connection Object Browser colors
   const bgColor = activeConnectionConfig?.bg_color || "var(--bg-panel)";
   const fgColor = activeConnectionConfig?.fg_color || undefined;
   const selectedColor = activeConnectionConfig?.selected_color || "var(--bg-selected)";
+
+  const previewRequestId = useRef(0);
+  const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
+  const startLoading = useCallback((key: string) => setLoadingNodes(prev => new Set(prev).add(key)), []);
+  const stopLoading = useCallback((key: string) => setLoadingNodes(prev => { const next = new Set(prev); next.delete(key); return next; }), []);
 
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [activeColorKey, setActiveColorKey] = useState<"bg_color" | "fg_color" | "selected_color" | null>(null);
@@ -159,6 +192,8 @@ export function ObjectBrowser() {
   const handleDbToggle = async (db: string) => {
     toggleDb(db);
     if (!expandedDbs.has(db) && !tables[db]) {
+      const nodeKey = `db:${db}`;
+      startLoading(nodeKey);
       try {
         const t = await invoke<{ name: string; table_type: string }[]>("get_tables", {
           connectionId: activeConnectionId,
@@ -167,6 +202,8 @@ export function ObjectBrowser() {
         setTables(db, t);
       } catch (e) {
         console.error(e);
+      } finally {
+        stopLoading(nodeKey);
       }
     }
   };
@@ -174,7 +211,8 @@ export function ObjectBrowser() {
   const handleDbDoubleClick = (db: string) => {
     const snippet = `\`${db}\``;
     const state = useAppStore.getState();
-    const activeTab = state.queryTabs.find((t) => t.id === state.activeTabId);
+    const session = getActiveSession(state);
+    const activeTab = session?.queryTabs.find((t) => t.id === session.activeTabId);
 
     if (activeTab && activeTab.type === "query") {
       state.updateTabSql(activeTab.id, activeTab.sql + snippet);
@@ -193,6 +231,8 @@ export function ObjectBrowser() {
     } else {
       next.add(key);
       if (!columns[key]) {
+        const nodeKey = `col:${key}`;
+        startLoading(nodeKey);
         try {
           const cols = await invoke<import("../../types").ColumnInfo[]>("get_columns", {
             connectionId: activeConnectionId,
@@ -202,20 +242,28 @@ export function ObjectBrowser() {
           setColumns(key, cols);
         } catch (e) {
           console.error(e);
+        } finally {
+          stopLoading(nodeKey);
         }
       }
     }
     setExpandedTables(next);
   };
 
-  const loadTablePreview = async (db: string, table: string) => {
+  const loadTablePreview = async (db: string, table: string, page = 0) => {
     if (!activeConnectionId) return;
+    const requestId = ++previewRequestId.current;
+    setLoadingData(true);
     try {
       const key = tableKey(db, table);
-      const [result, cols] = await Promise.all([
-        invoke<import("../../types").QueryResult>("execute_query", {
+      const pageSize = getActiveSession(useAppStore.getState())?.dataPageSize ?? 1000;
+      const [result, cols, countResult] = await Promise.all([
+        invoke<import("../../types").QueryResult>("get_table_data", {
           connectionId: activeConnectionId,
-          sql: `SELECT * FROM \`${db}\`.\`${table}\` LIMIT 1000`,
+          database: db,
+          table,
+          page,
+          limit: pageSize,
         }),
         columns[key]
           ? Promise.resolve(columns[key])
@@ -224,13 +272,27 @@ export function ObjectBrowser() {
               database: db,
               table,
             }),
+        invoke<import("../../types").QueryResult>("execute_query", {
+          connectionId: activeConnectionId,
+          sql: `SELECT COUNT(*) AS cnt FROM \`${db}\`.\`${table}\``,
+        }),
       ]);
+      // Guard: descartar si se lanzó otro request más reciente mientras este cargaba
+      if (requestId !== previewRequestId.current) return;
       if (!columns[key]) {
         setColumns(key, cols);
       }
       setDataResult(result, `${db}.${table}`, db, table, cols);
+      setDataPage(page);
+      const totalRows = countResult.rows[0]?.[0];
+      setDataTotalRows(typeof totalRows === "number" ? totalRows : Number(totalRows));
     } catch (e) {
       console.error(e);
+    } finally {
+      // Solo limpiar loading si este es el request más reciente
+      if (requestId === previewRequestId.current) {
+        setLoadingData(false);
+      }
     }
   };
 
@@ -242,7 +304,8 @@ export function ObjectBrowser() {
   const openQuerySelect = (db: string, table: string) => {
     const snippet = `SELECT * FROM \`${db}\`.\`${table}\` LIMIT 1000;`;
     const state = useAppStore.getState();
-    const activeTab = state.queryTabs.find((t) => t.id === state.activeTabId);
+    const session = getActiveSession(state);
+    const activeTab = session?.queryTabs.find((t) => t.id === session.activeTabId);
 
     if (activeTab && activeTab.type === "query") {
       // Append to the active query tab (with newline if there's existing content)
@@ -430,9 +493,9 @@ export function ObjectBrowser() {
             >
               <span
                 onClick={(e) => { e.stopPropagation(); handleDbToggle(db); }}
-                style={{ fontSize: 10, color: "var(--text-muted)", width: 12, cursor: "pointer" }}
+                style={{ fontSize: 10, color: "var(--text-muted)", width: 12, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
               >
-                {expandedDbs.has(db) ? "▼" : "▶"}
+                {loadingNodes.has(`db:${db}`) ? <span className="spinner spinner-sm" /> : expandedDbs.has(db) ? "▼" : "▶"}
               </span>
               <span style={{ color: "#e8c08c" }}>🗄</span>
               <span style={{ fontSize: 13 }}>{db}</span>
@@ -467,9 +530,9 @@ export function ObjectBrowser() {
                       >
                         <span
                           onClick={(e) => { e.stopPropagation(); toggleTable(db, t.name); }}
-                          style={{ fontSize: 9, color: "var(--text-muted)", width: 12, flexShrink: 0 }}
+                          style={{ fontSize: 9, color: "var(--text-muted)", width: 12, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
                         >
-                          {isExpanded ? "▼" : "▶"}
+                          {loadingNodes.has(`col:${key}`) ? <span className="spinner spinner-sm" /> : isExpanded ? "▼" : "▶"}
                         </span>
                         <span style={{ color: t.table_type === "VIEW" ? "#9cdcfe" : "#4fc1ff" }}>
                           {t.table_type === "VIEW" ? "◈" : "▤"}

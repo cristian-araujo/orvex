@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { v4 as uuidv4 } from "uuid";
+import { useShallow } from "zustand/react/shallow";
 import { useAppStore } from "../../store/useAppStore";
 import type { ConnectionProfile, ConnectionConfig } from "../../types";
 import { MySQLTab } from "./tabs/MySQLTab";
@@ -48,7 +49,15 @@ const tabStyle = (active: boolean): React.CSSProperties => ({
 });
 
 export function ConnectionDialog() {
-  const { savedConnections, setSavedConnections, createSession, sessions, setShowConnectionDialog } = useAppStore();
+  const { savedConnections, sessions } = useAppStore(useShallow(s => ({
+    savedConnections: s.savedConnections,
+    sessions: s.sessions,
+  })));
+  const { setSavedConnections, createSession, setShowConnectionDialog } = useAppStore(useShallow(s => ({
+    setSavedConnections: s.setSavedConnections,
+    createSession: s.createSession,
+    setShowConnectionDialog: s.setShowConnectionDialog,
+  })));
   const [selected, setSelected] = useState<ConnectionProfile | null>(null);
   const [form, setForm] = useState<ConnectionConfig>(DEFAULT_CONFIG);
   const [name, setName] = useState("");

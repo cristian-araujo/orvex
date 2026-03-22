@@ -100,6 +100,8 @@ export interface QueryTab {
   // table tab fields
   database?: string;
   table?: string;
+  // auto-limit flag
+  autoLimited?: boolean;
 }
 
 export type BottomTab = "data" | "results" | "messages";
@@ -131,6 +133,11 @@ export interface ConnectionSession {
   dataTable: string | null;
   dataColumns: ColumnInfo[] | null;
   dataPrimaryKeys: string[];
+  // Loading & pagination
+  isLoadingData: boolean;
+  dataPage: number;
+  dataPageSize: number;
+  dataTotalRows: number | null;
 }
 
 // --- Data editing ---

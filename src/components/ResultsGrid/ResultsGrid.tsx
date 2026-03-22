@@ -3,7 +3,8 @@ import { AgGridReact } from "ag-grid-react";
 import type { ColDef, GridApi } from "ag-grid-community";
 import { themeAlpine, colorSchemeDark } from "ag-grid-community";
 import { invoke } from "@tauri-apps/api/core";
-import { useAppStore } from "../../store/useAppStore";
+import { useShallow } from "zustand/react/shallow";
+import { useAppStore, getActiveSession } from "../../store/useAppStore";
 import { EditableDataGrid } from "./EditableDataGrid";
 import { FilterBar } from "./FilterBar";
 import type { ActiveColumnFilter } from "./FilterBar";
@@ -129,12 +130,39 @@ function summarizeFilterModel(model: Record<string, unknown>): string {
 
 export function ResultsGrid() {
   const {
-    queryTabs, activeTabId, activeBottomTab, setActiveBottomTab,
+    queryTabs, activeTabId, activeBottomTab,
     dataResult, dataTableName, dataDatabase, dataTable, dataColumns, dataPrimaryKeys,
-    activeConnectionId, setDataResult, setColumns, activeSessionId,
-    isLoadingData, dataPage, dataPageSize, setLoadingData, setDataPage,
-    dataTotalRows, setDataTotalRows,
-  } = useAppStore();
+    activeConnectionId, activeSessionId,
+    isLoadingData, dataPage, dataPageSize,
+    dataTotalRows,
+  } = useAppStore(useShallow(s => {
+    const session = getActiveSession(s);
+    return {
+      queryTabs: session?.queryTabs ?? [],
+      activeTabId: session?.activeTabId ?? null,
+      activeBottomTab: session?.activeBottomTab ?? ("results" as const),
+      dataResult: session?.dataResult ?? null,
+      dataTableName: session?.dataTableName ?? null,
+      dataDatabase: session?.dataDatabase ?? null,
+      dataTable: session?.dataTable ?? null,
+      dataColumns: session?.dataColumns ?? null,
+      dataPrimaryKeys: session?.dataPrimaryKeys ?? [],
+      activeConnectionId: session?.connectionId ?? null,
+      activeSessionId: s.activeSessionId,
+      isLoadingData: session?.isLoadingData ?? false,
+      dataPage: session?.dataPage ?? 0,
+      dataPageSize: session?.dataPageSize ?? 1000,
+      dataTotalRows: session?.dataTotalRows ?? null,
+    };
+  }));
+  const { setActiveBottomTab, setDataResult, setColumns, setLoadingData, setDataPage, setDataTotalRows } = useAppStore(useShallow(s => ({
+    setActiveBottomTab: s.setActiveBottomTab,
+    setDataResult: s.setDataResult,
+    setColumns: s.setColumns,
+    setLoadingData: s.setLoadingData,
+    setDataPage: s.setDataPage,
+    setDataTotalRows: s.setDataTotalRows,
+  })));
 
   const activeTab = queryTabs.find((t) => t.id === activeTabId);
   const queryResult = activeTab?.result ?? null;
@@ -274,8 +302,9 @@ export function ResultsGrid() {
   // Reload data after apply — mantiene la página actual
   const handleDataReload = useCallback(async () => {
     if (!activeConnectionId || !dataDatabase || !dataTable) return;
-    const currentPage = useAppStore.getState().dataPage;
-    const pageSize = useAppStore.getState().dataPageSize;
+    const activeSession = getActiveSession(useAppStore.getState());
+    const currentPage = activeSession?.dataPage ?? 0;
+    const pageSize = activeSession?.dataPageSize ?? 1000;
     setLoadingData(true);
     setFilteredRowCount(null);
     try {
@@ -312,7 +341,7 @@ export function ResultsGrid() {
   // Navegar páginas del data preview
   const loadDataPage = useCallback(async (page: number) => {
     if (!activeConnectionId || !dataDatabase || !dataTable) return;
-    const pageSize = useAppStore.getState().dataPageSize;
+    const pageSize = getActiveSession(useAppStore.getState())?.dataPageSize ?? 1000;
     setLoadingData(true);
     setFilteredRowCount(null);
     try {

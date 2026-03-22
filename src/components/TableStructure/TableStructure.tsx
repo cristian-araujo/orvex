@@ -6,7 +6,8 @@ import { themeAlpine, colorSchemeDark } from "ag-grid-community";
 import MonacoEditor from "@monaco-editor/react";
 
 const darkTheme = themeAlpine.withPart(colorSchemeDark);
-import { useAppStore } from "../../store/useAppStore";
+import { useShallow } from "zustand/react/shallow";
+import { useAppStore, getActiveSession } from "../../store/useAppStore";
 import type { TableStructure as TableStructureType, QueryResult, TableViewTab } from "../../types";
 
 const PAGE_SIZE = 500;
@@ -48,7 +49,13 @@ interface Props {
 }
 
 export function TableStructure({ database, table }: Props) {
-  const { activeConnectionId, activeSessionId } = useAppStore();
+  const { connectionId: activeConnectionId, activeSessionId } = useAppStore(useShallow(s => {
+    const session = getActiveSession(s);
+    return {
+      connectionId: session?.connectionId ?? null,
+      activeSessionId: s.activeSessionId,
+    };
+  }));
   const [activeTab, setActiveTab] = useState<TableViewTab>("data");
   const [structure, setStructure] = useState<TableStructureType | null>(null);
   const [dataResult, setDataResult] = useState<QueryResult | null>(null);

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useShallow } from "zustand/react/shallow";
 import { useAppStore } from "../../store/useAppStore";
 import type { ConnectionConfig } from "../../types";
 
@@ -10,7 +11,17 @@ interface TabContextMenu {
 }
 
 export function ConnectionTabs() {
-  const { sessions, activeSessionId, switchSession, closeSession, setShowConnectionDialog, setShowColorEditor, updateSessionConnectionId } = useAppStore();
+  const { sessions, activeSessionId } = useAppStore(useShallow(s => ({
+    sessions: s.sessions,
+    activeSessionId: s.activeSessionId,
+  })));
+  const { switchSession, closeSession, setShowConnectionDialog, setShowColorEditor, updateSessionConnectionId } = useAppStore(useShallow(s => ({
+    switchSession: s.switchSession,
+    closeSession: s.closeSession,
+    setShowConnectionDialog: s.setShowConnectionDialog,
+    setShowColorEditor: s.setShowColorEditor,
+    updateSessionConnectionId: s.updateSessionConnectionId,
+  })));
   const [contextMenu, setContextMenu] = useState<TabContextMenu | null>(null);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
 

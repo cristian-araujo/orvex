@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from "react";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { invoke } from "@tauri-apps/api/core";
-import { useAppStore } from "./store/useAppStore";
+import { useShallow } from "zustand/react/shallow";
+import { useAppStore, getActiveSession } from "./store/useAppStore";
 import { ConnectionDialog } from "./components/ConnectionManager/ConnectionDialog";
 import { ObjectBrowser } from "./components/ObjectBrowser/ObjectBrowser";
 import { SqlEditor } from "./components/SqlEditor/SqlEditor";
@@ -15,11 +16,23 @@ import { useClipboardFix } from "./hooks/useClipboardFix";
 import type { ConnectionConfig } from "./types";
 
 function QueryTabs() {
-  const {
-    queryTabs, activeTabId, activeConnectionId,
-    setActiveTab, closeQueryTab, addQueryTab,
-    setTabResult, setTabExecuting, setTabError, setActiveBottomTab,
-  } = useAppStore();
+  const { queryTabs, activeTabId, activeConnectionId } = useAppStore(useShallow(s => {
+    const session = getActiveSession(s);
+    return {
+      queryTabs: session?.queryTabs ?? [],
+      activeTabId: session?.activeTabId ?? null,
+      activeConnectionId: session?.connectionId ?? null,
+    };
+  }));
+  const { setActiveTab, closeQueryTab, addQueryTab, setTabResult, setTabExecuting, setTabError, setActiveBottomTab } = useAppStore(useShallow(s => ({
+    setActiveTab: s.setActiveTab,
+    closeQueryTab: s.closeQueryTab,
+    addQueryTab: s.addQueryTab,
+    setTabResult: s.setTabResult,
+    setTabExecuting: s.setTabExecuting,
+    setTabError: s.setTabError,
+    setActiveBottomTab: s.setActiveBottomTab,
+  })));
 
   const activeTab = queryTabs.find((t) => t.id === activeTabId);
   const canExecute = activeTab?.type === "query" && !!activeTab.sql.trim();
@@ -135,7 +148,13 @@ function QueryTabs() {
 }
 
 function ActiveTabContent() {
-  const { queryTabs, activeTabId } = useAppStore();
+  const { queryTabs, activeTabId } = useAppStore(useShallow(s => {
+    const session = getActiveSession(s);
+    return {
+      queryTabs: session?.queryTabs ?? [],
+      activeTabId: session?.activeTabId ?? null,
+    };
+  }));
   const activeTab = queryTabs.find((t) => t.id === activeTabId);
   const isTableTab = activeTab?.type === "table" && !!activeTab.database && !!activeTab.table;
 
@@ -170,7 +189,15 @@ function ActiveTabContent() {
 }
 
 export default function App() {
-  const { showConnectionDialog, activeConnectionId, sessions, setShowConnectionDialog } = useAppStore();
+  const { showConnectionDialog, activeConnectionId, sessions } = useAppStore(useShallow(s => {
+    const session = getActiveSession(s);
+    return {
+      showConnectionDialog: s.showConnectionDialog,
+      activeConnectionId: session?.connectionId ?? null,
+      sessions: s.sessions,
+    };
+  }));
+  const setShowConnectionDialog = useAppStore(s => s.setShowConnectionDialog);
   const [appReady, setAppReady] = useState(false);
   const initRef = useRef(false);
 
@@ -240,8 +267,9 @@ export default function App() {
       }
       if (e.ctrlKey && e.key === "w") {
         e.preventDefault();
-        const { activeTabId, closeQueryTab } = useAppStore.getState();
-        if (activeTabId) closeQueryTab(activeTabId);
+        const state = useAppStore.getState();
+        const activeSession = getActiveSession(state);
+        if (activeSession?.activeTabId) state.closeQueryTab(activeSession.activeTabId);
       }
     };
     window.addEventListener("keydown", handler);

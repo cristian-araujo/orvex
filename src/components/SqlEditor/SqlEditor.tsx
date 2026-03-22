@@ -2,12 +2,33 @@ import { useRef, useCallback, useEffect } from "react";
 import MonacoEditor, { type OnMount } from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { useAppStore } from "../../store/useAppStore";
+import { useShallow } from "zustand/react/shallow";
+import { useAppStore, getActiveSession } from "../../store/useAppStore";
 import type { editor } from "monaco-editor";
 import { KeyCode, KeyMod } from "monaco-editor";
 
+function ensureLimit(sql: string, defaultLimit = 1000): { sql: string; autoLimited: boolean } {
+  const trimmed = sql.trim();
+  const first = trimmed.split(/\s+/)[0]?.toUpperCase() ?? "";
+  if (!["SELECT", "SHOW", "WITH", "DESCRIBE", "DESC", "EXPLAIN"].includes(first)) {
+    return { sql: trimmed, autoLimited: false };
+  }
+  if (/\bLIMIT\s+\d+/i.test(trimmed)) {
+    return { sql: trimmed, autoLimited: false };
+  }
+  const clean = trimmed.replace(/;\s*$/, "");
+  return { sql: `${clean} LIMIT ${defaultLimit}`, autoLimited: true };
+}
+
 export function SqlEditor() {
-  const { queryTabs, activeTabId, updateTabSql } = useAppStore();
+  const { queryTabs, activeTabId } = useAppStore(useShallow(s => {
+    const session = getActiveSession(s);
+    return {
+      queryTabs: session?.queryTabs ?? [],
+      activeTabId: session?.activeTabId ?? null,
+    };
+  }));
+  const updateTabSql = useAppStore(s => s.updateTabSql);
 
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   // Ref siempre apunta a la versión actual de executeQuery — evita stale closure en Monaco commands
@@ -16,10 +37,13 @@ export function SqlEditor() {
   const activeTab = queryTabs.find((t) => t.id === activeTabId);
 
   const executeQuery = useCallback(async () => {
-    const { activeTabId, activeConnectionId } = useAppStore.getState();
+    const state = useAppStore.getState();
+    const activeSession = getActiveSession(state);
+    if (!activeSession) return;
+    const { activeTabId, connectionId: activeConnectionId } = activeSession;
     if (!activeTabId || !activeConnectionId) return;
 
-    const tab = useAppStore.getState().queryTabs.find((t) => t.id === activeTabId);
+    const tab = activeSession.queryTabs.find((t) => t.id === activeTabId);
     if (!tab) return;
 
     let sql = tab.sql.trim();
@@ -33,13 +57,16 @@ export function SqlEditor() {
 
     if (!sql) return;
 
+    const { sql: safeSql, autoLimited } = ensureLimit(sql);
+
     useAppStore.getState().setTabExecuting(activeTabId, true);
     useAppStore.getState().setTabError(activeTabId, null);
     useAppStore.getState().setActiveBottomTab("results");
 
     try {
-      const result = await invoke("execute_query", { connectionId: activeConnectionId, sql });
+      const result = await invoke("execute_query", { connectionId: activeConnectionId, sql: safeSql });
       useAppStore.getState().setTabResult(activeTabId, result as any);
+      useAppStore.getState().setTabAutoLimited(activeTabId, autoLimited);
     } catch (e) {
       useAppStore.getState().setTabError(activeTabId, String(e));
       useAppStore.getState().setActiveBottomTab("messages");
