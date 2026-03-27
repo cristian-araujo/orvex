@@ -695,7 +695,8 @@ export function ObjectBrowser() {
                     onConfirm: () => {
                       invoke("drop_database", { connectionId: activeConnectionId, database })
                         .then(() => {
-                          setDatabases(databases.filter(d => d !== database));
+                          const currentDbs = getActiveSession(useAppStore.getState())?.databases ?? [];
+                          setDatabases(currentDbs.filter(d => d !== database));
                           setSelectedDatabase(null);
                           setDataResult(null, null);
                         })
@@ -814,7 +815,10 @@ export function ObjectBrowser() {
                     variant: "danger",
                     onConfirm: () => {
                       invoke("drop_table", { connectionId: activeConnectionId, database, table })
-                        .then(() => setTables(database, (tables[database] ?? []).filter(tbl => tbl.name !== table)))
+                        .then(() => {
+                          const currentTables = getActiveSession(useAppStore.getState())?.tables[database] ?? [];
+                          setTables(database, currentTables.filter(tbl => tbl.name !== table));
+                        })
                         .catch(console.error);
                     },
                   });

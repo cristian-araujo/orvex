@@ -226,7 +226,7 @@ pub async fn drop_all_tables(
 ) -> Result<u32, String> {
     let pool = state.get_pool(&connection_id)?;
     let rows = sqlx::query(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = ?"
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = 'BASE TABLE'"
     )
     .bind(&database)
     .fetch_all(&pool)
