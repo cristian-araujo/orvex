@@ -133,6 +133,75 @@ pub struct TableStructure {
     pub create_sql: String,
 }
 
+// --- Export/Import ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ExportFormat {
+    Sql,
+    Csv,
+    Json,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ExportContent {
+    StructureOnly,
+    DataOnly,
+    StructureAndData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportOptions {
+    pub format: ExportFormat,
+    pub content: ExportContent,
+    pub database: String,
+    pub tables: Vec<String>,
+    pub file_path: String,
+    // SQL options
+    pub drop_table: bool,
+    pub drop_database: bool,
+    pub create_database: bool,
+    pub lock_tables: bool,
+    pub disable_foreign_keys: bool,
+    pub extended_inserts: bool,
+    pub extended_insert_rows: u32,
+    pub set_names: bool,
+    pub add_timestamps: bool,
+    pub hex_binary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportOptions {
+    pub file_path: String,
+    pub database: String,
+    pub stop_on_error: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportProgressPayload {
+    pub operation_id: String,
+    pub phase: String,
+    pub current_table: String,
+    pub tables_done: u32,
+    pub tables_total: u32,
+    pub rows_exported: u64,
+    pub bytes_written: u64,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportProgressPayload {
+    pub operation_id: String,
+    pub phase: String,
+    pub bytes_read: u64,
+    pub bytes_total: u64,
+    pub statements_executed: u64,
+    pub errors_count: u64,
+    pub current_statement_preview: String,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
 // --- Data editing ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

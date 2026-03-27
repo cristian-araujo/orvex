@@ -37,4 +37,5 @@ data-encoding = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-mcp-bridge = "0.10"
 tauri-plugin-clipboard-manager = "2.3.2"
+futures = "0.3"
 

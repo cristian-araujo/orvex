@@ -1,15 +1,14 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { HexColorPicker, HexColorInput } from "react-colorful";
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore, getActiveSession } from "../../store/useAppStore";
+import { ConfirmDialog } from "../ResultsGrid/ConfirmDialog";
 
-interface ContextMenu {
-  x: number;
-  y: number;
-  database: string;
-  table: string;
-}
+type ContextMenuState =
+  | { type: "database"; x: number; y: number; database: string }
+  | { type: "table"; x: number; y: number; database: string; table: string };
 
 export function ObjectBrowser() {
   const {
@@ -47,7 +46,7 @@ export function ObjectBrowser() {
   const showColorEditor = useAppStore(s => s.showColorEditor);
   const {
     setDatabases, toggleDb, setTables, setExpandedTables, setColumns,
-    setSelectedDatabase, setShowColorEditor, addQueryTab, addTableTab,
+    setSelectedDatabase, setShowColorEditor, setShowExportDialog, addQueryTab, addTableTab,
     updateActiveConnectionConfig, setDataResult, setDbFilter, setTableFilter,
     setLoadingData, setDataPage, setDataTotalRows,
   } = useAppStore(useShallow(s => ({
@@ -58,6 +57,7 @@ export function ObjectBrowser() {
     setColumns: s.setColumns,
     setSelectedDatabase: s.setSelectedDatabase,
     setShowColorEditor: s.setShowColorEditor,
+    setShowExportDialog: s.setShowExportDialog,
     addQueryTab: s.addQueryTab,
     addTableTab: s.addTableTab,
     updateActiveConnectionConfig: s.updateActiveConnectionConfig,
@@ -79,7 +79,13 @@ export function ObjectBrowser() {
   const startLoading = useCallback((key: string) => setLoadingNodes(prev => new Set(prev).add(key)), []);
   const stopLoading = useCallback((key: string) => setLoadingNodes(prev => { const next = new Set(prev); next.delete(key); return next; }), []);
 
-  const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    variant: "danger" | "warning";
+    onConfirm: () => void;
+  } | null>(null);
   const [activeColorKey, setActiveColorKey] = useState<"bg_color" | "fg_color" | "selected_color" | null>(null);
   // Draft colors for live preview without persisting
   const [draftColors, setDraftColors] = useState<Record<string, string>>({});
@@ -252,12 +258,16 @@ export function ObjectBrowser() {
 
   const loadTablePreview = async (db: string, table: string, page = 0) => {
     if (!activeConnectionId) return;
+    setSelectedDatabase(db);
+    const key = tableKey(db, table);
+    // Skip si la misma tabla ya está cargada en la misma página
+    if (dataTableName === key && page === 0) return;
     const requestId = ++previewRequestId.current;
     setLoadingData(true);
     try {
-      const key = tableKey(db, table);
       const pageSize = getActiveSession(useAppStore.getState())?.dataPageSize ?? 1000;
-      const [result, cols, countResult] = await Promise.all([
+      // Fase 1: cargar datos + columnas en paralelo — mostrar data sin esperar COUNT(*)
+      const [result, cols] = await Promise.all([
         invoke<import("../../types").QueryResult>("get_table_data", {
           connectionId: activeConnectionId,
           database: db,
@@ -272,24 +282,31 @@ export function ObjectBrowser() {
               database: db,
               table,
             }),
-        invoke<import("../../types").QueryResult>("execute_query", {
-          connectionId: activeConnectionId,
-          sql: `SELECT COUNT(*) AS cnt FROM \`${db}\`.\`${table}\``,
-        }),
       ]);
-      // Guard: descartar si se lanzó otro request más reciente mientras este cargaba
       if (requestId !== previewRequestId.current) return;
       if (!columns[key]) {
         setColumns(key, cols);
       }
       setDataResult(result, `${db}.${table}`, db, table, cols);
       setDataPage(page);
-      const totalRows = countResult.rows[0]?.[0];
-      setDataTotalRows(typeof totalRows === "number" ? totalRows : Number(totalRows));
+      setLoadingData(false);
+      // Fase 2: COUNT(*) asíncrono — actualiza totalRows sin bloquear el UI
+      const offset = page * pageSize;
+      if (result.rows.length < pageSize) {
+        // Página incompleta: sabemos el total exacto sin query adicional
+        setDataTotalRows(offset + result.rows.length);
+      } else {
+        invoke<import("../../types").QueryResult>("execute_query", {
+          connectionId: activeConnectionId,
+          sql: `SELECT COUNT(*) AS cnt FROM \`${db}\`.\`${table}\``,
+        }).then((countResult) => {
+          if (requestId !== previewRequestId.current) return;
+          const totalRows = countResult.rows[0]?.[0];
+          setDataTotalRows(typeof totalRows === "number" ? totalRows : Number(totalRows));
+        }).catch(console.error);
+      }
     } catch (e) {
       console.error(e);
-    } finally {
-      // Solo limpiar loading si este es el request más reciente
       if (requestId === previewRequestId.current) {
         setLoadingData(false);
       }
@@ -318,10 +335,16 @@ export function ObjectBrowser() {
     setSelectedDatabase(db);
   };
 
+  const handleDbContextMenu = (e: React.MouseEvent, db: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ type: "database", x: e.clientX, y: e.clientY, database: db });
+  };
+
   const handleTableContextMenu = (e: React.MouseEvent, db: string, table: string) => {
     e.preventDefault();
     e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY, database: db, table });
+    setContextMenu({ type: "table", x: e.clientX, y: e.clientY, database: db, table });
   };
 
   const rowHover = {
@@ -479,6 +502,7 @@ export function ObjectBrowser() {
             <div
               onClick={() => handleDbClick(db)}
               onDoubleClick={(e) => { e.preventDefault(); handleDbDoubleClick(db); }}
+              onContextMenu={(e) => handleDbContextMenu(e, db)}
               style={{
                 padding: "3px 8px",
                 cursor: "pointer",
@@ -575,43 +599,252 @@ export function ObjectBrowser() {
         ))}
       </div>
 
+      {/* Database context menu */}
+      {contextMenu?.type === "database" && (() => {
+        const { database, x, y } = contextMenu;
+        return (
+          <div
+            style={{
+              position: "fixed",
+              top: y,
+              left: x,
+              background: "var(--bg-surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              zIndex: 1000,
+              minWidth: 200,
+              boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {[
+              {
+                label: "↺  Refresh",
+                action: () => {
+                  setContextMenu(null);
+                  const nodeKey = `db:${database}`;
+                  startLoading(nodeKey);
+                  invoke<{ name: string; table_type: string }[]>("get_tables", { connectionId: activeConnectionId, database })
+                    .then(t => setTables(database, t))
+                    .catch(console.error)
+                    .finally(() => stopLoading(nodeKey));
+                },
+              },
+              {
+                label: "✦  New Query",
+                action: () => { setContextMenu(null); setSelectedDatabase(database); addQueryTab(); },
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                onClick={item.action}
+                style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
+              >
+                {item.label}
+              </div>
+            ))}
+            <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+            {[
+              {
+                label: "⇪  Export Database",
+                action: () => { setContextMenu(null); setSelectedDatabase(database); setShowExportDialog(true); },
+              },
+              {
+                label: "⎘  Copy Name",
+                action: () => { setContextMenu(null); writeText(database).catch(console.error); },
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                onClick={item.action}
+                style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
+              >
+                {item.label}
+              </div>
+            ))}
+            <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+            {[
+              {
+                label: "⊟  Drop All Tables",
+                action: () => {
+                  setContextMenu(null);
+                  setConfirmDialog({
+                    title: "Drop All Tables",
+                    message: `Are you sure you want to drop all tables in "${database}"? This action cannot be undone.`,
+                    variant: "warning",
+                    onConfirm: () => {
+                      invoke("drop_all_tables", { connectionId: activeConnectionId, database })
+                        .then(() => setTables(database, []))
+                        .catch(console.error);
+                    },
+                  });
+                },
+              },
+              {
+                label: "✗  Drop Database",
+                action: () => {
+                  setContextMenu(null);
+                  setConfirmDialog({
+                    title: "Drop Database",
+                    message: `Are you sure you want to drop the database "${database}"? All data will be permanently lost.`,
+                    variant: "danger",
+                    onConfirm: () => {
+                      invoke("drop_database", { connectionId: activeConnectionId, database })
+                        .then(() => {
+                          setDatabases(databases.filter(d => d !== database));
+                          setSelectedDatabase(null);
+                          setDataResult(null, null);
+                        })
+                        .catch(console.error);
+                    },
+                  });
+                },
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                onClick={item.action}
+                style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
+              >
+                {item.label}
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
       {/* Table context menu */}
-      {contextMenu && (
-        <div
-          style={{
-            position: "fixed",
-            top: contextMenu.y,
-            left: contextMenu.x,
-            background: "var(--bg-surface)",
-            border: "1px solid var(--border)",
-            borderRadius: 4,
-            zIndex: 1000,
-            minWidth: 180,
-            boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {[
-            {
-              label: "▤  Open Table (Data + Structure)",
-              action: () => { openTableData(contextMenu.database, contextMenu.table); setContextMenu(null); },
-            },
-            {
-              label: "▶  Select 1000 rows (Query tab)",
-              action: () => { openQuerySelect(contextMenu.database, contextMenu.table); setContextMenu(null); },
-            },
-          ].map((item) => (
-            <div
-              key={item.label}
-              onClick={item.action}
-              style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
-              onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
-              onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
-            >
-              {item.label}
-            </div>
-          ))}
-        </div>
+      {contextMenu?.type === "table" && (() => {
+        const { database, table, x, y } = contextMenu;
+        const colKey = tableKey(database, table);
+        return (
+          <div
+            style={{
+              position: "fixed",
+              top: y,
+              left: x,
+              background: "var(--bg-surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              zIndex: 1000,
+              minWidth: 200,
+              boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {[
+              {
+                label: "▤  Open Table (Data + Structure)",
+                action: () => { openTableData(database, table); setContextMenu(null); },
+              },
+              {
+                label: "▶  Select 1000 rows (Query tab)",
+                action: () => { openQuerySelect(database, table); setContextMenu(null); },
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                onClick={item.action}
+                style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
+              >
+                {item.label}
+              </div>
+            ))}
+            <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+            {[
+              {
+                label: "⎘  Copy Table Name",
+                action: () => { setContextMenu(null); writeText(table).catch(console.error); },
+              },
+              {
+                label: "↺  Refresh Columns",
+                action: () => {
+                  setContextMenu(null);
+                  const nodeKey = `col:${colKey}`;
+                  startLoading(nodeKey);
+                  invoke<import("../../types").ColumnInfo[]>("get_columns", { connectionId: activeConnectionId, database, table })
+                    .then(cols => setColumns(colKey, cols))
+                    .catch(console.error)
+                    .finally(() => stopLoading(nodeKey));
+                },
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                onClick={item.action}
+                style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
+              >
+                {item.label}
+              </div>
+            ))}
+            <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+            {[
+              {
+                label: "⊟  Truncate Table",
+                action: () => {
+                  setContextMenu(null);
+                  setConfirmDialog({
+                    title: "Truncate Table",
+                    message: `Are you sure you want to truncate "${table}"? All data will be deleted but the table structure will remain.`,
+                    variant: "warning",
+                    onConfirm: () => {
+                      invoke("truncate_table", { connectionId: activeConnectionId, database, table })
+                        .catch(console.error);
+                    },
+                  });
+                },
+              },
+              {
+                label: "✗  Drop Table",
+                action: () => {
+                  setContextMenu(null);
+                  setConfirmDialog({
+                    title: "Drop Table",
+                    message: `Are you sure you want to drop the table "${table}"? This action cannot be undone.`,
+                    variant: "danger",
+                    onConfirm: () => {
+                      invoke("drop_table", { connectionId: activeConnectionId, database, table })
+                        .then(() => setTables(database, (tables[database] ?? []).filter(tbl => tbl.name !== table)))
+                        .catch(console.error);
+                    },
+                  });
+                },
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                onClick={item.action}
+                style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
+              >
+                {item.label}
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* Confirm dialog */}
+      {confirmDialog && (
+        <ConfirmDialog
+          title={confirmDialog.title}
+          message={confirmDialog.message}
+          variant={confirmDialog.variant}
+          confirmLabel="Yes, proceed"
+          onConfirm={() => { confirmDialog.onConfirm(); setConfirmDialog(null); }}
+          onCancel={() => setConfirmDialog(null)}
+        />
       )}
     </div>
   );

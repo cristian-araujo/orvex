@@ -10,6 +10,8 @@ export function Toolbar() {
     };
   }));
   const setShowConnectionDialog = useAppStore(s => s.setShowConnectionDialog);
+  const setShowExportDialog = useAppStore(s => s.setShowExportDialog);
+  const setShowImportDialog = useAppStore(s => s.setShowImportDialog);
   const closeSession = useAppStore(s => s.closeSession);
 
   const btnStyle = (disabled = false): React.CSSProperties => ({
@@ -43,6 +45,20 @@ export function Toolbar() {
 
       {activeConnectionId && (
         <>
+          <button
+            style={btnStyle()}
+            onClick={() => setShowExportDialog(true)}
+            title="Export Database"
+          >
+            Export
+          </button>
+          <button
+            style={btnStyle()}
+            onClick={() => setShowImportDialog(true)}
+            title="Import SQL File"
+          >
+            Import
+          </button>
           <div style={{ flex: 1 }} />
           <button
             style={{ ...btnStyle(), color: "var(--danger)" }}

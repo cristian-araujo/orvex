@@ -5,6 +5,8 @@ mod ssh;
 
 use db::manager::ConnectionManager;
 use commands::connection::*;
+use commands::export::*;
+use commands::import::*;
 use commands::query::*;
 use commands::schema::*;
 use commands::session::*;
@@ -42,9 +44,18 @@ pub fn run() {
             get_tables,
             get_columns,
             get_table_structure,
+            drop_table,
+            truncate_table,
+            drop_database,
+            drop_all_tables,
             // Session
             save_session_state,
             load_session_state,
+            // Export/Import
+            start_export,
+            cancel_export,
+            start_import,
+            cancel_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

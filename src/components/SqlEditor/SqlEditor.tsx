@@ -40,7 +40,7 @@ export function SqlEditor() {
     const state = useAppStore.getState();
     const activeSession = getActiveSession(state);
     if (!activeSession) return;
-    const { activeTabId, connectionId: activeConnectionId } = activeSession;
+    const { activeTabId, connectionId: activeConnectionId, selectedDatabase } = activeSession;
     if (!activeTabId || !activeConnectionId) return;
 
     const tab = activeSession.queryTabs.find((t) => t.id === activeTabId);
@@ -64,7 +64,7 @@ export function SqlEditor() {
     useAppStore.getState().setActiveBottomTab("results");
 
     try {
-      const result = await invoke("execute_query", { connectionId: activeConnectionId, sql: safeSql });
+      const result = await invoke("execute_query", { connectionId: activeConnectionId, sql: safeSql, database: selectedDatabase });
       useAppStore.getState().setTabResult(activeTabId, result as any);
       useAppStore.getState().setTabAutoLimited(activeTabId, autoLimited);
     } catch (e) {

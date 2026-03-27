@@ -1,5 +1,5 @@
 use sqlx::{Pool, MySql, Row, Column, Arguments};
-use sqlx::mysql::MySqlArguments;
+use sqlx::mysql::{MySqlArguments, MySqlConnection};
 use tauri::State;
 use crate::db::manager::ConnectionManager;
 use crate::models::{QueryResult, TableEditRequest, TableEditOperation, ApplyEditsResult};
@@ -74,12 +74,12 @@ fn cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
     serde_json::json!(format!("<unsupported: {}>", col_type))
 }
 
-pub async fn run_query(pool: &Pool<MySql>, sql: &str) -> Result<QueryResult, String> {
+async fn run_query_on_conn(conn: &mut MySqlConnection, sql: &str) -> Result<QueryResult, String> {
     let start = std::time::Instant::now();
 
     if is_fetchable(sql) {
         let rows = sqlx::query(sql)
-            .fetch_all(pool)
+            .fetch_all(&mut *conn)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -102,7 +102,7 @@ pub async fn run_query(pool: &Pool<MySql>, sql: &str) -> Result<QueryResult, Str
         })
     } else {
         let result = sqlx::query(sql)
-            .execute(pool)
+            .execute(&mut *conn)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -115,14 +115,29 @@ pub async fn run_query(pool: &Pool<MySql>, sql: &str) -> Result<QueryResult, Str
     }
 }
 
+pub async fn run_query(pool: &Pool<MySql>, sql: &str) -> Result<QueryResult, String> {
+    let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
+    run_query_on_conn(&mut *conn, sql).await
+}
+
 #[tauri::command]
 pub async fn execute_query(
     state: State<'_, ConnectionManager>,
     connection_id: String,
     sql: String,
+    database: Option<String>,
 ) -> Result<QueryResult, String> {
     let pool = state.get_pool(&connection_id)?;
-    run_query(&pool, &sql).await
+    let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
+
+    if let Some(ref db) = database {
+        sqlx::query(&format!("USE `{}`", sanitize_ident(db)))
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    run_query_on_conn(&mut *conn, &sql).await
 }
 
 #[tauri::command]
@@ -144,7 +159,7 @@ pub async fn get_table_data(
 }
 
 // Sanitize identifier: escape backticks to prevent SQL injection
-fn sanitize_ident(name: &str) -> String {
+pub(crate) fn sanitize_ident(name: &str) -> String {
     name.replace('`', "``")
 }
 

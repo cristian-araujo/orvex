@@ -2837,6 +2837,7 @@ dependencies = [
  "cbc",
  "data-encoding",
  "des",
+ "futures",
  "md-5",
  "russh",
  "russh-keys",

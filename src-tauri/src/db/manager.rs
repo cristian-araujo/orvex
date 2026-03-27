@@ -77,6 +77,7 @@ impl ConnectionManager {
         }
 
         let pool = match MySqlPoolOptions::new()
+            .min_connections(2)
             .max_connections(5)
             .connect_with(opts)
             .await

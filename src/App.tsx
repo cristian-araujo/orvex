@@ -13,15 +13,19 @@ import { ConnectionTabs } from "./components/Layout/ConnectionTabs";
 import { StatusBar } from "./components/Layout/StatusBar";
 import { loadPersistedState, deserializeSession, startAutoSave, forceSave } from "./store/sessionPersistence";
 import { useClipboardFix } from "./hooks/useClipboardFix";
+import { ExportDialog } from "./components/ImportExport/ExportDialog";
+import { ImportDialog } from "./components/ImportExport/ImportDialog";
+import { ProgressDialog } from "./components/ImportExport/ProgressDialog";
 import type { ConnectionConfig } from "./types";
 
 function QueryTabs() {
-  const { queryTabs, activeTabId, activeConnectionId } = useAppStore(useShallow(s => {
+  const { queryTabs, activeTabId, activeConnectionId, selectedDatabase } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
       queryTabs: session?.queryTabs ?? [],
       activeTabId: session?.activeTabId ?? null,
       activeConnectionId: session?.connectionId ?? null,
+      selectedDatabase: session?.selectedDatabase ?? null,
     };
   }));
   const { setActiveTab, closeQueryTab, addQueryTab, setTabResult, setTabExecuting, setTabError, setActiveBottomTab } = useAppStore(useShallow(s => ({
@@ -46,6 +50,7 @@ function QueryTabs() {
       const result = await (await import("@tauri-apps/api/core")).invoke("execute_query", {
         connectionId: activeConnectionId,
         sql: activeTab!.sql.trim(),
+        database: selectedDatabase,
       });
       setTabResult(activeTabId, result as any);
     } catch (e) {
@@ -189,10 +194,13 @@ function ActiveTabContent() {
 }
 
 export default function App() {
-  const { showConnectionDialog, activeConnectionId, sessions } = useAppStore(useShallow(s => {
+  const { showConnectionDialog, showExportDialog, showImportDialog, activeOperation, activeConnectionId, sessions } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
       showConnectionDialog: s.showConnectionDialog,
+      showExportDialog: s.showExportDialog,
+      showImportDialog: s.showImportDialog,
+      activeOperation: s.activeOperation,
       activeConnectionId: session?.connectionId ?? null,
       sessions: s.sessions,
     };
@@ -297,6 +305,11 @@ export default function App() {
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
       {showConnectionDialog && <ConnectionDialog />}
+      {showExportDialog && <ExportDialog />}
+      {showImportDialog && <ImportDialog />}
+      {activeOperation && (
+        <ProgressDialog type={activeOperation.type} operationId={activeOperation.operationId} />
+      )}
 
       <Toolbar />
       <ConnectionTabs />

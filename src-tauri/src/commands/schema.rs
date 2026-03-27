@@ -159,3 +159,103 @@ pub async fn get_table_structure(
         create_sql,
     })
 }
+
+#[tauri::command]
+pub async fn drop_table(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+    table: String,
+) -> Result<(), String> {
+    let pool = state.get_pool(&connection_id)?;
+    let sql = format!(
+        "DROP TABLE `{}`.`{}`",
+        crate::commands::query::sanitize_ident(&database),
+        crate::commands::query::sanitize_ident(&table)
+    );
+    sqlx::query(&sql)
+        .execute(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn truncate_table(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+    table: String,
+) -> Result<(), String> {
+    let pool = state.get_pool(&connection_id)?;
+    let sql = format!(
+        "TRUNCATE TABLE `{}`.`{}`",
+        crate::commands::query::sanitize_ident(&database),
+        crate::commands::query::sanitize_ident(&table)
+    );
+    sqlx::query(&sql)
+        .execute(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn drop_database(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+) -> Result<(), String> {
+    let pool = state.get_pool(&connection_id)?;
+    let sql = format!(
+        "DROP DATABASE `{}`",
+        crate::commands::query::sanitize_ident(&database)
+    );
+    sqlx::query(&sql)
+        .execute(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn drop_all_tables(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+) -> Result<u32, String> {
+    let pool = state.get_pool(&connection_id)?;
+    let rows = sqlx::query(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = ?"
+    )
+    .bind(&database)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let table_names: Vec<String> = rows.iter().map(|r| r.get::<String, _>(0)).collect();
+    let count = table_names.len() as u32;
+    let db_ident = crate::commands::query::sanitize_ident(&database);
+    let table_list: Vec<String> = table_names
+        .iter()
+        .map(|t| format!("`{}`.`{}`", db_ident, crate::commands::query::sanitize_ident(t)))
+        .collect();
+    let drop_sql = format!("DROP TABLE IF EXISTS {}", table_list.join(", "));
+    let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
+    sqlx::query("SET FOREIGN_KEY_CHECKS=0")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| e.to_string())?;
+    let drop_result = sqlx::query(&drop_sql)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| e.to_string());
+    // Always restore FK checks, even if drop failed
+    let _ = sqlx::query("SET FOREIGN_KEY_CHECKS=1")
+        .execute(&mut *conn)
+        .await;
+    drop_result?;
+    Ok(count)
+}

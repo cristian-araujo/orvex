@@ -37,6 +37,9 @@ interface AppState {
   savedConnections: ConnectionProfile[];
   showConnectionDialog: boolean;
   showColorEditor: boolean;
+  showExportDialog: boolean;
+  showImportDialog: boolean;
+  activeOperation: { type: "export" | "import"; operationId: string } | null;
 
   // Sessions
   sessions: ConnectionSession[];
@@ -55,6 +58,9 @@ interface AppState {
   setSavedConnections: (connections: ConnectionProfile[]) => void;
   setShowConnectionDialog: (show: boolean) => void;
   setShowColorEditor: (show: boolean) => void;
+  setShowExportDialog: (show: boolean) => void;
+  setShowImportDialog: (show: boolean) => void;
+  setActiveOperation: (op: { type: "export" | "import"; operationId: string } | null) => void;
 
   // Active session actions
   updateActiveConnectionConfig: (updates: Partial<ConnectionConfig>) => void;
@@ -89,6 +95,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   savedConnections: [],
   showConnectionDialog: true,
   showColorEditor: false,
+  showExportDialog: false,
+  showImportDialog: false,
+  activeOperation: null,
 
   // Sessions
   sessions: [],
@@ -190,6 +199,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSavedConnections: (connections) => set({ savedConnections: connections }),
   setShowConnectionDialog: (show) => set({ showConnectionDialog: show }),
   setShowColorEditor: (show) => set({ showColorEditor: show }),
+  setShowExportDialog: (show) => set({ showExportDialog: show }),
+  setShowImportDialog: (show) => set({ showImportDialog: show }),
+  setActiveOperation: (op) => set({ activeOperation: op }),
 
   // --- Active session actions ---
 

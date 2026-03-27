@@ -162,6 +162,60 @@ export interface ApplyEditsResult {
   message: string;
 }
 
+// --- Export/Import ---
+
+export type ExportFormat = "Sql" | "Csv" | "Json";
+export type ExportContent = "StructureOnly" | "DataOnly" | "StructureAndData";
+
+export interface ExportOptions {
+  format: ExportFormat;
+  content: ExportContent;
+  database: string;
+  tables: string[];
+  file_path: string;
+  // SQL options
+  drop_table: boolean;
+  drop_database: boolean;
+  create_database: boolean;
+  lock_tables: boolean;
+  disable_foreign_keys: boolean;
+  extended_inserts: boolean;
+  extended_insert_rows: number;
+  set_names: boolean;
+  add_timestamps: boolean;
+  hex_binary: boolean;
+}
+
+export interface ImportOptions {
+  file_path: string;
+  database: string;
+  stop_on_error: boolean;
+}
+
+export interface ExportProgressPayload {
+  operation_id: string;
+  phase: "structure" | "data" | "complete" | "error" | "cancelled";
+  current_table: string;
+  tables_done: number;
+  tables_total: number;
+  rows_exported: number;
+  bytes_written: number;
+  elapsed_ms: number;
+  error: string | null;
+}
+
+export interface ImportProgressPayload {
+  operation_id: string;
+  phase: "executing" | "complete" | "error" | "cancelled";
+  bytes_read: number;
+  bytes_total: number;
+  statements_executed: number;
+  errors_count: number;
+  current_statement_preview: string;
+  elapsed_ms: number;
+  error: string | null;
+}
+
 // --- Session persistence ---
 
 export interface PersistedQueryTab {
