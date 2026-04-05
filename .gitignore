@@ -1,3 +1,6 @@
+# Local-only directories
+docs/
+
 # Logs
 logs
 *.log
