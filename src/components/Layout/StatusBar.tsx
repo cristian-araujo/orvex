@@ -1,5 +1,6 @@
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore, getActiveSession } from "../../store/useAppStore";
+import { APP_NAME } from "../../appConfig";
 
 export function StatusBar() {
   const {
@@ -50,7 +51,7 @@ export function StatusBar() {
         <span>Not connected</span>
       )}
       <div style={{ flex: 1 }} />
-      <span>MySQL GUI</span>
+      <span>{APP_NAME}</span>
     </div>
   );
 }

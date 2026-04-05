@@ -3,6 +3,7 @@ import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "reac
 import { invoke } from "@tauri-apps/api/core";
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore, getActiveSession } from "./store/useAppStore";
+import { APP_NAME } from "./appConfig";
 import { ConnectionDialog } from "./components/ConnectionManager/ConnectionDialog";
 import { ObjectBrowser } from "./components/ObjectBrowser/ObjectBrowser";
 import { SqlEditor } from "./components/SqlEditor/SqlEditor";
@@ -357,7 +358,7 @@ export default function App() {
             color: "var(--text-muted)",
           }}>
             <div style={{ fontSize: 48 }}>🐬</div>
-            <div style={{ fontSize: 18 }}>MySQL GUI</div>
+            <div style={{ fontSize: 18 }}>{APP_NAME}</div>
             <button
               className="btn-primary"
               style={{ marginTop: 8 }}

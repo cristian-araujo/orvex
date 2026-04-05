@@ -556,8 +556,9 @@ async fn do_export_sql(
 
     // Header
     if options.add_timestamps {
+        let app_name = app.config().product_name.as_deref().unwrap_or("Orvex");
         let now = sqlx::types::chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        w!(format!("-- MySQL GUI Database Export\n-- Database: {}\n-- Date: {}\n-- ------------------------------------------------------\n\n", options.database, now));
+        w!(format!("-- {} Database Export\n-- Database: {}\n-- Date: {}\n-- ------------------------------------------------------\n\n", app_name, options.database, now));
     }
 
     w!("/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\n");

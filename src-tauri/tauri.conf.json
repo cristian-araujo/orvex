@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MySQL GUI",
+  "productName": "Orvex",
   "version": "0.1.0",
-  "identifier": "com.hansz.mysql-gui",
+  "identifier": "com.hansz.orvex",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "MySQL GUI",
+        "title": "Orvex",
         "width": 1400,
         "height": 900,
         "minWidth": 900,
