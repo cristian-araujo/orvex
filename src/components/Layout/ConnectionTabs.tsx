@@ -1,8 +1,6 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore } from "../../store/useAppStore";
-import type { ConnectionConfig } from "../../types";
 
 interface TabContextMenu {
   x: number;
@@ -15,31 +13,15 @@ export function ConnectionTabs() {
     sessions: s.sessions,
     activeSessionId: s.activeSessionId,
   })));
-  const { switchSession, closeSession, setShowConnectionDialog, setShowColorEditor, updateSessionConnectionId } = useAppStore(useShallow(s => ({
+  const { switchSession, closeSession, setShowConnectionDialog, setShowColorEditor } = useAppStore(useShallow(s => ({
     switchSession: s.switchSession,
     closeSession: s.closeSession,
     setShowConnectionDialog: s.setShowConnectionDialog,
     setShowColorEditor: s.setShowColorEditor,
-    updateSessionConnectionId: s.updateSessionConnectionId,
   })));
+  const reconnectingSessionId = useAppStore(s => s.reconnectingSessionId);
+  const reconnectSession = useAppStore(s => s.reconnectSession);
   const [contextMenu, setContextMenu] = useState<TabContextMenu | null>(null);
-  const [reconnecting, setReconnecting] = useState<string | null>(null);
-
-  const handleReconnect = async (sessionId: string) => {
-    const session = sessions.find((s) => s.id === sessionId);
-    if (!session || session.connectionId) return;
-    setReconnecting(sessionId);
-    try {
-      const connectionId = await invoke<string>("connect", {
-        config: session.connectionConfig as ConnectionConfig,
-      });
-      updateSessionConnectionId(sessionId, connectionId);
-    } catch (e) {
-      console.error("Reconnect failed:", e);
-    } finally {
-      setReconnecting(null);
-    }
-  };
 
   useEffect(() => {
     const handler = () => setContextMenu(null);
@@ -65,12 +47,12 @@ export function ConnectionTabs() {
         {sessions.map((session) => {
           const isActive = session.id === activeSessionId;
           const isConnected = !!session.connectionId;
-          const isSessionReconnecting = reconnecting === session.id;
+          const isSessionReconnecting = reconnectingSessionId === session.id;
           return (
             <div
               key={session.id}
               onClick={() => switchSession(session.id)}
-              onDoubleClick={() => { if (!isConnected && !isSessionReconnecting) handleReconnect(session.id); }}
+              onDoubleClick={() => { if (!isConnected && !isSessionReconnecting) reconnectSession(session.id); }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -162,7 +144,7 @@ export function ConnectionTabs() {
               <>
                 {!ctxConnected && (
                   <div
-                    onClick={() => { handleReconnect(contextMenu.sessionId); setContextMenu(null); }}
+                    onClick={() => { reconnectSession(contextMenu.sessionId); setContextMenu(null); }}
                     style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap", color: "var(--success)" }}
                     onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
                     onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}

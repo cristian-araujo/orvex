@@ -49,6 +49,8 @@ interface AppState {
   sessions: ConnectionSession[];
   activeSessionId: string | null;
   isRestoring: boolean;
+  reconnectingSessionId: string | null;
+  reconnectError: string | null;
 
   // Session lifecycle
   createSession: (connectionId: string, name: string, config: ConnectionConfig, profileId?: string) => void;
@@ -56,6 +58,7 @@ interface AppState {
   closeSession: (sessionId: string) => Promise<void>;
   restoreSessions: (sessions: ConnectionSession[], activeSessionId: string | null) => void;
   updateSessionConnectionId: (sessionId: string, connectionId: string) => void;
+  reconnectSession: (sessionId: string) => Promise<void>;
   setIsRestoring: (restoring: boolean) => void;
 
   // Global actions
@@ -112,6 +115,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   isRestoring: false,
+  reconnectingSessionId: null,
+  reconnectError: null,
 
   // --- Session lifecycle ---
 
@@ -199,6 +204,22 @@ export const useAppStore = create<AppState>((set, get) => ({
         sess.id === sessionId ? { ...sess, connectionId } : sess,
       ),
     }));
+  },
+
+  reconnectSession: async (sessionId) => {
+    const session = get().sessions.find((s) => s.id === sessionId);
+    if (!session || session.connectionId) return;
+    set({ reconnectingSessionId: sessionId, reconnectError: null });
+    try {
+      const connectionId = await invoke<string>("connect", {
+        config: session.connectionConfig as ConnectionConfig,
+      });
+      get().updateSessionConnectionId(sessionId, connectionId);
+    } catch (e) {
+      set({ reconnectError: String(e) });
+    } finally {
+      set({ reconnectingSessionId: null });
+    }
   },
 
   setIsRestoring: (restoring) => set({ isRestoring: restoring }),

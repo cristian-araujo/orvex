@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use crate::models::ConnectionConfig;
 use crate::ssh::tunnel::SshTunnel;
+use crate::utils::expand_tilde;
 
 struct ManagedConnection {
     pool: Pool<MySql>,
@@ -62,17 +63,17 @@ impl ConnectionManager {
 
             if let Some(ref ca) = config.ssl_ca_path {
                 if !ca.is_empty() {
-                    opts = opts.ssl_ca(ca);
+                    opts = opts.ssl_ca(expand_tilde(ca));
                 }
             }
             if let Some(ref cert) = config.ssl_cert_path {
                 if !cert.is_empty() {
-                    opts = opts.ssl_client_cert(cert);
+                    opts = opts.ssl_client_cert(expand_tilde(cert));
                 }
             }
             if let Some(ref key) = config.ssl_key_path {
                 if !key.is_empty() {
-                    opts = opts.ssl_client_key(key);
+                    opts = opts.ssl_client_key(expand_tilde(key));
                 }
             }
         }

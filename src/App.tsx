@@ -201,7 +201,7 @@ function ActiveTabContent() {
 }
 
 export default function App() {
-  const { showConnectionDialog, showExportDialog, showImportDialog, showSettingsDialog, activeOperation, activeConnectionId, sessions } = useAppStore(useShallow(s => {
+  const { showConnectionDialog, showExportDialog, showImportDialog, showSettingsDialog, activeOperation, activeConnectionId, activeConnectionName, activeSessionId, reconnectingSessionId, reconnectError } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
       showConnectionDialog: s.showConnectionDialog,
@@ -210,10 +210,14 @@ export default function App() {
       showSettingsDialog: s.showSettingsDialog,
       activeOperation: s.activeOperation,
       activeConnectionId: session?.connectionId ?? null,
-      sessions: s.sessions,
+      activeConnectionName: session?.connectionName ?? null,
+      activeSessionId: s.activeSessionId,
+      reconnectingSessionId: s.reconnectingSessionId,
+      reconnectError: s.reconnectError,
     };
   }));
   const setShowConnectionDialog = useAppStore(s => s.setShowConnectionDialog);
+  const reconnectSession = useAppStore(s => s.reconnectSession);
   const [appReady, setAppReady] = useState(false);
   const initRef = useRef(false);
 
@@ -279,10 +283,9 @@ export default function App() {
         }
       }
 
-      // If no session could reconnect, open the connection dialog so the user
-      // isn't stuck looking at an empty screen with no way to connect.
+      // Log summary — disconnected sessions stay visible with the new "Reconnect to Database" state
       if (!anyConnected) {
-        useAppStore.getState().setShowConnectionDialog(true);
+        console.warn("All sessions failed to reconnect on startup.");
       }
 
       useAppStore.getState().setIsRestoring(false);
@@ -350,7 +353,7 @@ export default function App() {
       <ConnectionTabs />
 
       <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
-        {sessions.length > 0 && activeConnectionId ? (
+        {activeConnectionId ? (
           <PanelGroup orientation="horizontal" style={{ height: "100%" }}>
             <Panel defaultSize="18%" minSize="150px" maxSize="50%">
               <ObjectBrowser />
@@ -360,7 +363,42 @@ export default function App() {
               <ActiveTabContent />
             </Panel>
           </PanelGroup>
+        ) : activeSessionId ? (
+          // Active session exists but connection was lost — offer reconnect without losing tabs
+          <div style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexDirection: "column",
+            gap: 16,
+            color: "var(--text-muted)",
+          }}>
+            <div style={{ fontSize: 48 }}>🐬</div>
+            <div style={{ fontSize: 14 }}>{activeConnectionName}</div>
+            <button
+              className="btn-primary"
+              style={{ marginTop: 8 }}
+              disabled={reconnectingSessionId === activeSessionId}
+              onClick={() => reconnectSession(activeSessionId)}
+            >
+              {reconnectingSessionId === activeSessionId ? "Reconnecting..." : "Reconnect to Database"}
+            </button>
+            {reconnectError && (
+              <div style={{
+                marginTop: 4,
+                fontSize: 12,
+                color: "var(--danger)",
+                maxWidth: 420,
+                textAlign: "center",
+                lineHeight: 1.5,
+              }}>
+                {reconnectError}
+              </div>
+            )}
+          </div>
         ) : (
+          // No sessions — first run or all sessions closed
           <div style={{
             flex: 1,
             display: "flex",

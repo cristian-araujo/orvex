@@ -6,11 +6,15 @@ use tokio::sync::watch;
 use russh::keys::key;
 
 use crate::models::ConnectionConfig;
+use crate::utils::expand_tilde;
 
 /// Load a private key, trying russh-keys first and falling back to manual
 /// PEM decryption for formats that russh-keys doesn't support (e.g. keys
 /// encrypted with DES-EDE3-CBC or AES-256-CBC).
 fn load_private_key(path: &str, passphrase: Option<&str>) -> Result<key::KeyPair, String> {
+    let path = expand_tilde(path);
+    let path = path.as_str();
+
     // Try russh-keys first (handles OpenSSH format, unencrypted PEM, AES-128-CBC PEM)
     match russh_keys::load_secret_key(path, passphrase) {
         Ok(kp) => return Ok(kp),

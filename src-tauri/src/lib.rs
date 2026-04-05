@@ -2,6 +2,7 @@ mod models;
 mod db;
 mod commands;
 mod ssh;
+mod utils;
 
 use db::manager::ConnectionManager;
 use commands::connection::*;

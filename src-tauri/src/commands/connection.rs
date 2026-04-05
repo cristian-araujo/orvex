@@ -3,6 +3,7 @@ use uuid::Uuid;
 use std::fs;
 use crate::db::manager::ConnectionManager;
 use crate::models::{ConnectionConfig, ConnectionProfile};
+use crate::utils::expand_tilde;
 
 fn connections_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e: tauri::Error| e.to_string())?;
@@ -52,13 +53,13 @@ pub async fn test_connection(config: ConnectionConfig) -> Result<String, String>
         opts = opts.ssl_mode(ssl_mode);
 
         if let Some(ref ca) = config.ssl_ca_path {
-            if !ca.is_empty() { opts = opts.ssl_ca(ca); }
+            if !ca.is_empty() { opts = opts.ssl_ca(expand_tilde(ca)); }
         }
         if let Some(ref cert) = config.ssl_cert_path {
-            if !cert.is_empty() { opts = opts.ssl_client_cert(cert); }
+            if !cert.is_empty() { opts = opts.ssl_client_cert(expand_tilde(cert)); }
         }
         if let Some(ref key) = config.ssl_key_path {
-            if !key.is_empty() { opts = opts.ssl_client_key(key); }
+            if !key.is_empty() { opts = opts.ssl_client_key(expand_tilde(key)); }
         }
     }
 

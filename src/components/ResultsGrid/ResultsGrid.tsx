@@ -8,12 +8,11 @@ import { useAppStore, getActiveSession } from "../../store/useAppStore";
 import { EditableDataGrid } from "./EditableDataGrid";
 import { FilterBar } from "./FilterBar";
 import type { ActiveColumnFilter } from "./FilterBar";
-import type { QueryResult, QueryTab, ColumnInfo } from "../../types";
+import type { QueryResult, QueryTab } from "../../types";
 
 const darkTheme = themeAlpine.withPart(colorSchemeDark);
 const EMPTY_TABS: QueryTab[] = [];
 const EMPTY_PKS: string[] = [];
-const EMPTY_COLS: ColumnInfo[] = [];
 
 function buildColDefs(result: QueryResult | null, nullDisplayText: string): ColDef[] {
   if (!result?.columns.length) return [];
