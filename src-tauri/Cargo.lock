@@ -2829,32 +2829,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mysql-gui"
-version = "0.1.0"
-dependencies = [
- "aes",
- "async-trait",
- "cbc",
- "data-encoding",
- "des",
- "futures",
- "md-5",
- "russh",
- "russh-keys",
- "serde",
- "serde_json",
- "sqlx",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "tauri-plugin-mcp-bridge",
- "tauri-plugin-opener",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3442,6 +3416,32 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "orvex"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "async-trait",
+ "cbc",
+ "data-encoding",
+ "des",
+ "futures",
+ "md-5",
+ "russh",
+ "russh-keys",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "tauri-plugin-mcp-bridge",
+ "tauri-plugin-opener",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
