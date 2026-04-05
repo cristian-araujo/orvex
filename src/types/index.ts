@@ -216,6 +216,81 @@ export interface ImportProgressPayload {
   error: string | null;
 }
 
+// --- Charset / Collation ---
+
+export interface CharsetInfo {
+  charset: string;
+  description: string;
+  default_collation: string;
+}
+
+// Sentinel page size used when table_data_limit is null (unlimited mode).
+// The backend accepts this as a LIMIT value; 999_999_999 exceeds any realistic
+// table size while staying well within MySQL's integer range.
+export const UNLIMITED_PAGE_SIZE = 999_999_999;
+
+// --- App Settings ---
+
+export interface ExportSqlDefaults {
+  drop_table: boolean;
+  drop_database: boolean;
+  create_database: boolean;
+  lock_tables: boolean;
+  disable_foreign_keys: boolean;
+  extended_inserts: boolean;
+  extended_insert_rows: number;
+  set_names: boolean;
+  add_timestamps: boolean;
+  hex_binary: boolean;
+}
+
+export type DatetimeDisplayFormat = "iso" | "eu" | "us";
+
+export interface AppSettings {
+  // Export / Import
+  export_filename_template: string;
+  export_default_directory: string;
+  import_default_directory: string;
+  export_default_format: ExportFormat;
+  export_default_content: ExportContent;
+  export_default_sql_options: ExportSqlDefaults;
+  // Grid & Display
+  null_display_text: string;
+  grid_row_height: number;
+  datetime_display_format: DatetimeDisplayFormat;
+  // Query
+  table_data_limit: number | null;
+  editor_tab_size: number;
+  // General
+  confirm_on_disconnect: boolean;
+}
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  export_filename_template: "{database}_{date}",
+  export_default_directory: "",
+  import_default_directory: "",
+  export_default_format: "Sql",
+  export_default_content: "StructureAndData",
+  export_default_sql_options: {
+    drop_table: true,
+    drop_database: false,
+    create_database: false,
+    lock_tables: true,
+    disable_foreign_keys: true,
+    extended_inserts: true,
+    extended_insert_rows: 1000,
+    set_names: true,
+    add_timestamps: true,
+    hex_binary: true,
+  },
+  null_display_text: "NULL",
+  grid_row_height: 24,
+  datetime_display_format: "iso",
+  table_data_limit: 1000,
+  editor_tab_size: 2,
+  confirm_on_disconnect: true,
+};
+
 // --- Session persistence ---
 
 export interface PersistedQueryTab {

@@ -21,11 +21,12 @@ function ensureLimit(sql: string, defaultLimit = 1000): { sql: string; autoLimit
 }
 
 export function SqlEditor() {
-  const { queryTabs, activeTabId } = useAppStore(useShallow(s => {
+  const { queryTabs, activeTabId, editorTabSize } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
       queryTabs: session?.queryTabs ?? [],
       activeTabId: session?.activeTabId ?? null,
+      editorTabSize: s.settings.editor_tab_size,
     };
   }));
   const updateTabSql = useAppStore(s => s.updateTabSql);
@@ -178,6 +179,7 @@ export function SqlEditor() {
         onMount={handleMount}
         options={{
           fontSize: 14,
+          tabSize: editorTabSize,
           minimap: { enabled: false },
           scrollBeyondLastLine: false,
           wordWrap: "on",

@@ -16,6 +16,11 @@ use crate::models::{ExportContent, ExportFormat, ExportOptions, ExportProgressPa
 static CANCEL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+// Latest progress payload per operation — used by the frontend to recover from the race condition
+// where events are emitted before ProgressDialog's listener has time to register.
+static EXPORT_PROGRESS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, ExportProgressPayload>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
 fn register_cancel(id: &str) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     CANCEL_REGISTRY
@@ -27,6 +32,10 @@ fn register_cancel(id: &str) -> Arc<AtomicBool> {
 
 fn unregister_cancel(id: &str) {
     CANCEL_REGISTRY.lock().unwrap().remove(id);
+    // Remove cached progress so completed operations don't occupy memory indefinitely
+    if let Ok(mut cache) = EXPORT_PROGRESS_CACHE.lock() {
+        cache.remove(id);
+    }
 }
 
 // --- Hex lookup table (avoids format! per byte) ---
@@ -183,6 +192,11 @@ fn write_sql_value(out: &mut String, row: &MySqlRow, idx: usize, kind: ColKind, 
                 out.push('\'');
                 out.push_str(&v.format("%Y-%m-%d %H:%M:%S").to_string());
                 out.push('\'');
+            } else if let Ok(Some(v)) = row.try_get::<Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>, _>(idx) {
+                // TIMESTAMP columns decode as DateTime<Utc> in sqlx — format without timezone suffix
+                out.push('\'');
+                out.push_str(&v.format("%Y-%m-%d %H:%M:%S").to_string());
+                out.push('\'');
             } else {
                 out.push_str("NULL");
             }
@@ -272,6 +286,8 @@ fn write_csv_value(out: &mut String, row: &MySqlRow, idx: usize, kind: ColKind) 
         }
         ColKind::DateTime => {
             if let Ok(Some(v)) = row.try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(idx) { v.format("%Y-%m-%d %H:%M:%S").to_string() }
+            // TIMESTAMP columns decode as DateTime<Utc> in sqlx — format without timezone suffix
+            else if let Ok(Some(v)) = row.try_get::<Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>, _>(idx) { v.format("%Y-%m-%d %H:%M:%S").to_string() }
             else { return; }
         }
         ColKind::Date => {
@@ -342,6 +358,11 @@ fn write_json_value(out: &mut String, row: &MySqlRow, idx: usize, kind: ColKind)
         out.push('"');
         out.push_str(&v.format("%Y-%m-%d %H:%M:%S").to_string());
         out.push('"');
+    } else if let Ok(Some(v)) = row.try_get::<Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>, _>(idx) {
+        // TIMESTAMP columns decode as DateTime<Utc> in sqlx — format without timezone suffix
+        out.push('"');
+        out.push_str(&v.format("%Y-%m-%d %H:%M:%S").to_string());
+        out.push('"');
     } else if let Ok(Some(v)) = row.try_get::<Option<sqlx::types::chrono::NaiveDate>, _>(idx) {
         out.push('"');
         out.push_str(&v.format("%Y-%m-%d").to_string());
@@ -387,6 +408,9 @@ async fn get_table_list(pool: &Pool<MySql>, database: &str) -> Result<Vec<String
 }
 
 fn emit_progress(app: &AppHandle, payload: &ExportProgressPayload) {
+    if let Ok(mut cache) = EXPORT_PROGRESS_CACHE.lock() {
+        cache.insert(payload.operation_id.clone(), payload.clone());
+    }
     let _ = app.emit("export-progress", payload);
 }
 
@@ -1098,6 +1122,14 @@ pub async fn start_export(
     });
 
     Ok(operation_id)
+}
+
+#[tauri::command]
+pub fn get_export_progress(operation_id: String) -> Option<ExportProgressPayload> {
+    EXPORT_PROGRESS_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&operation_id).cloned())
 }
 
 #[tauri::command]

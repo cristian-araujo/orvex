@@ -1,7 +1,87 @@
 use sqlx::Row;
 use tauri::State;
 use crate::db::manager::ConnectionManager;
-use crate::models::{ColumnInfo, ForeignKeyInfo, IndexInfo, TableInfo, TableStructure};
+use crate::models::{CharsetInfo, ColumnInfo, ForeignKeyInfo, IndexInfo, TableInfo, TableStructure};
+
+#[tauri::command]
+pub async fn get_charsets(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+) -> Result<Vec<CharsetInfo>, String> {
+    let pool = state.get_pool(&connection_id)?;
+    let rows = sqlx::query(
+        "SELECT CHARACTER_SET_NAME, DESCRIPTION, DEFAULT_COLLATE_NAME \
+         FROM information_schema.CHARACTER_SETS \
+         ORDER BY CHARACTER_SET_NAME"
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|r| CharsetInfo {
+            charset: r.get::<String, _>(0),
+            description: r.get::<String, _>(1),
+            default_collation: r.get::<String, _>(2),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn get_collations(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+    charset: String,
+) -> Result<Vec<String>, String> {
+    // Whitelist charset: only alphanumeric and underscores allowed
+    if !charset.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!("Invalid charset name: {}", charset));
+    }
+    let pool = state.get_pool(&connection_id)?;
+    let rows = sqlx::query("SHOW COLLATION WHERE Charset = ?")
+        .bind(&charset)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    // SHOW COLLATION columns: 0=Collation, 1=Charset, 2=Id, ...
+    let mut collations: Vec<String> = rows
+        .iter()
+        .map(|r| r.get::<String, _>(0))
+        .collect();
+    collations.sort();
+    Ok(collations)
+}
+
+#[tauri::command]
+pub async fn create_database(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+    name: String,
+    charset: String,
+    collation: String,
+) -> Result<(), String> {
+    // Whitelist charset and collation: only alphanumeric and underscores
+    if !charset.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!("Invalid charset name: {}", charset));
+    }
+    if !collation.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!("Invalid collation name: {}", collation));
+    }
+    let pool = state.get_pool(&connection_id)?;
+    let sql = format!(
+        "CREATE DATABASE `{}` CHARACTER SET {} COLLATE {}",
+        crate::commands::query::sanitize_ident(&name),
+        charset,
+        collation,
+    );
+    // CREATE DATABASE is not supported in the prepared statement protocol (MySQL error 1295),
+    // so we use raw_sql() which executes via the text/simple protocol instead.
+    sqlx::raw_sql(&sql)
+        .execute(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn get_databases(
@@ -23,15 +103,14 @@ pub async fn get_tables(
     database: String,
 ) -> Result<Vec<TableInfo>, String> {
     let pool = state.get_pool(&connection_id)?;
-    let sql = format!(
+    let rows = sqlx::query(
         "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES \
-         WHERE TABLE_SCHEMA = '{}' ORDER BY TABLE_NAME",
-        database
-    );
-    let rows = sqlx::query(&sql)
-        .fetch_all(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
+         WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME"
+    )
+    .bind(&database)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
         .map(|r| TableInfo {
@@ -49,17 +128,17 @@ pub async fn get_columns(
     table: String,
 ) -> Result<Vec<ColumnInfo>, String> {
     let pool = state.get_pool(&connection_id)?;
-    let sql = format!(
+    let rows = sqlx::query(
         "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA \
          FROM information_schema.COLUMNS \
-         WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' \
-         ORDER BY ORDINAL_POSITION",
-        database, table
-    );
-    let rows = sqlx::query(&sql)
-        .fetch_all(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+         ORDER BY ORDINAL_POSITION"
+    )
+    .bind(&database)
+    .bind(&table)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
         .map(|r| ColumnInfo {

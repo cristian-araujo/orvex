@@ -12,6 +12,11 @@ use crate::models::{ImportOptions, ImportProgressPayload};
 static IMPORT_CANCEL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+// Latest progress payload per operation — used by the frontend to recover from the race condition
+// where events are emitted before ProgressDialog's listener has time to register.
+static IMPORT_PROGRESS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, ImportProgressPayload>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
 fn register_cancel(id: &str) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     IMPORT_CANCEL_REGISTRY
@@ -23,13 +28,27 @@ fn register_cancel(id: &str) -> Arc<AtomicBool> {
 
 fn unregister_cancel(id: &str) {
     IMPORT_CANCEL_REGISTRY.lock().unwrap().remove(id);
+    // Remove cached progress so completed operations don't occupy memory indefinitely
+    if let Ok(mut cache) = IMPORT_PROGRESS_CACHE.lock() {
+        cache.remove(id);
+    }
 }
 
 fn emit_progress(app: &AppHandle, payload: &ImportProgressPayload) {
+    if let Ok(mut cache) = IMPORT_PROGRESS_CACHE.lock() {
+        cache.insert(payload.operation_id.clone(), payload.clone());
+    }
     let _ = app.emit("import-progress", payload);
 }
 
 // --- SQL Parser State Machine ---
+//
+// Operates on bytes rather than chars to avoid the O(n) Vec<char> allocation
+// that would otherwise occur for every line. All SQL structural tokens
+// (delimiters, quotes, comment markers) are ASCII, so byte-level scanning is
+// semantically equivalent to char-level scanning. UTF-8 continuation bytes
+// (0x80-0xBF) are never equal to any ASCII byte, so they are safely skipped
+// inside string literals without any special handling.
 
 struct SqlParser {
     delimiter: String,
@@ -92,10 +111,14 @@ impl SqlParser {
         }
         self.buffer.push_str(line);
 
-        // Process character by character to find delimiter outside of literals/comments
+        // Byte-level scan. Splitting at `i` is always safe because we only
+        // split at positions occupied by ASCII bytes (delimiter chars), and
+        // UTF-8 guarantees no multi-byte sequence contains an ASCII byte.
+        let delim_bytes = self.delimiter.as_bytes();
+        let delim_len = delim_bytes.len();
+        let bytes = self.buffer.as_bytes();
+        let len = bytes.len();
         let mut i = 0;
-        let chars: Vec<char> = self.buffer.chars().collect();
-        let len = chars.len();
 
         while i < len {
             if self.escape_next {
@@ -104,11 +127,11 @@ impl SqlParser {
                 continue;
             }
 
-            let ch = chars[i];
+            let b = bytes[i];
 
             // Block comment handling
             if self.in_block_comment {
-                if ch == '*' && i + 1 < len && chars[i + 1] == '/' {
+                if b == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
                     self.in_block_comment = false;
                     i += 2;
                     continue;
@@ -119,11 +142,11 @@ impl SqlParser {
 
             // String/backtick literal handling
             if self.in_single_quote {
-                if ch == '\\' {
+                if b == b'\\' {
                     self.escape_next = true;
-                } else if ch == '\'' {
+                } else if b == b'\'' {
                     // Check for escaped quote ''
-                    if i + 1 < len && chars[i + 1] == '\'' {
+                    if i + 1 < len && bytes[i + 1] == b'\'' {
                         i += 2;
                         continue;
                     }
@@ -134,10 +157,10 @@ impl SqlParser {
             }
 
             if self.in_double_quote {
-                if ch == '\\' {
+                if b == b'\\' {
                     self.escape_next = true;
-                } else if ch == '"' {
-                    if i + 1 < len && chars[i + 1] == '"' {
+                } else if b == b'"' {
+                    if i + 1 < len && bytes[i + 1] == b'"' {
                         i += 2;
                         continue;
                     }
@@ -148,8 +171,8 @@ impl SqlParser {
             }
 
             if self.in_backtick {
-                if ch == '`' {
-                    if i + 1 < len && chars[i + 1] == '`' {
+                if b == b'`' {
+                    if i + 1 < len && bytes[i + 1] == b'`' {
                         i += 2;
                         continue;
                     }
@@ -160,27 +183,26 @@ impl SqlParser {
             }
 
             // Not inside any literal
-            match ch {
-                '\'' => {
+            match b {
+                b'\'' => {
                     self.in_single_quote = true;
                     i += 1;
                 }
-                '"' => {
+                b'"' => {
                     self.in_double_quote = true;
                     i += 1;
                 }
-                '`' => {
+                b'`' => {
                     self.in_backtick = true;
                     i += 1;
                 }
-                '/' if i + 1 < len && chars[i + 1] == '*' => {
+                b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
                     // MySQL conditional comments /*!...*/ should be executed
-                    // But we still need to track block comments for /* not followed by !
-                    if i + 2 < len && chars[i + 2] == '!' {
-                        // Conditional comment: skip the /*! marker, content will be parsed normally
+                    // but regular /* ... */ block comments are skipped.
+                    if i + 2 < len && bytes[i + 2] == b'!' {
+                        // Conditional comment: skip /*! marker and optional version number
                         i += 3;
-                        // Skip optional version number
-                        while i < len && chars[i].is_ascii_digit() {
+                        while i < len && bytes[i].is_ascii_digit() {
                             i += 1;
                         }
                     } else {
@@ -188,41 +210,37 @@ impl SqlParser {
                         i += 2;
                     }
                 }
-                '-' if i + 1 < len && chars[i + 1] == '-' && (i + 2 >= len || chars[i + 2] == ' ' || chars[i + 2] == '\t' || chars[i + 2] == '\n') => {
-                    // Single-line comment: skip rest of this logical line within buffer
-                    // Find next newline in buffer from current position
-                    while i < len && chars[i] != '\n' {
+                b'-' if i + 1 < len && bytes[i + 1] == b'-'
+                    && (i + 2 >= len
+                        || bytes[i + 2] == b' '
+                        || bytes[i + 2] == b'\t'
+                        || bytes[i + 2] == b'\n') =>
+                {
+                    // Single-line comment: skip to end of line
+                    while i < len && bytes[i] != b'\n' {
                         i += 1;
                     }
                 }
-                '#' => {
+                b'#' => {
                     // Single-line comment
-                    while i < len && chars[i] != '\n' {
+                    while i < len && bytes[i] != b'\n' {
                         i += 1;
                     }
                 }
                 _ => {
-                    // Check if delimiter starts at current position
-                    let delim_chars: Vec<char> = self.delimiter.chars().collect();
-                    let delim_len = delim_chars.len();
-                    if i + delim_len <= len
-                        && chars[i..i + delim_len] == delim_chars[..]
-                    {
-                        // Found delimiter — emit statement
-                        let stmt: String = chars[..i].iter().collect();
-                        let stmt = stmt.trim().to_string();
+                    // Check if delimiter starts at current byte position
+                    if i + delim_len <= len && bytes[i..i + delim_len] == *delim_bytes {
+                        // Found delimiter — emit statement. Splitting at i is
+                        // safe: i points at an ASCII byte (start of delimiter).
+                        let stmt = self.buffer[..i].trim().to_string();
                         if !stmt.is_empty() {
                             statements.push(stmt);
                         }
-                        // Remove consumed part + delimiter from buffer
-                        let remaining: String = chars[i + delim_len..].iter().collect();
-                        self.buffer = remaining;
-                        return {
-                            // Recursively process remaining buffer
-                            let mut more = self.process_remaining();
-                            statements.append(&mut more);
-                            statements
-                        };
+                        // Keep everything after the delimiter for the next parse
+                        self.buffer = self.buffer[i + delim_len..].to_string();
+                        let mut more = self.process_remaining();
+                        statements.append(&mut more);
+                        return statements;
                     }
                     i += 1;
                 }
@@ -258,6 +276,184 @@ impl SqlParser {
             Some(stmt)
         }
     }
+}
+
+// --- INSERT chunking ---
+//
+// mysqldump with --extended-inserts (default) produces a single INSERT per
+// table that can be tens of megabytes. Executing that as one statement means
+// the progress bar never advances during the entire table load.
+//
+// split_insert_chunks detects `INSERT INTO ... VALUES (row),(row),...`
+// statements and splits them into chunks of `chunk_size` rows each. Smaller
+// chunks give more frequent progress events and let InnoDB's group-commit
+// mechanism work more efficiently. The function returns the original slice as
+// the sole element when no chunking is needed.
+//
+// Safety: we only split at ASCII byte boundaries (`,` between row tuples at
+// paren-depth 0, outside string literals), so UTF-8 data inside string values
+// is never corrupted.
+
+const INSERT_CHUNK_ROWS: usize = 5000;
+
+fn split_insert_chunks(stmt: &str) -> Vec<String> {
+    // Quick checks: must start with INSERT and be large enough to bother
+    let upper_prefix = stmt.trim_start().get(..7).unwrap_or("").to_uppercase();
+    if upper_prefix != "INSERT " || stmt.len() < 1024 {
+        return vec![stmt.to_string()];
+    }
+
+    // Locate the VALUES keyword outside of any literal. We scan bytes for the
+    // ASCII sequence " VALUES " (with surrounding spaces/newlines).
+    let bytes = stmt.as_bytes();
+    let len = bytes.len();
+    let values_start = {
+        let mut found = None;
+        let mut j = 0;
+        let mut in_sq = false;
+        let mut in_dq = false;
+        let mut in_bt = false;
+        let mut esc = false;
+        while j < len {
+            if esc { esc = false; j += 1; continue; }
+            let b = bytes[j];
+            if in_sq {
+                if b == b'\\' { esc = true; }
+                else if b == b'\'' {
+                    if j + 1 < len && bytes[j + 1] == b'\'' { j += 2; continue; }
+                    in_sq = false;
+                }
+                j += 1; continue;
+            }
+            if in_dq {
+                if b == b'\\' { esc = true; }
+                else if b == b'"' {
+                    if j + 1 < len && bytes[j + 1] == b'"' { j += 2; continue; }
+                    in_dq = false;
+                }
+                j += 1; continue;
+            }
+            if in_bt {
+                if b == b'`' { in_bt = false; }
+                j += 1; continue;
+            }
+            match b {
+                b'\'' => { in_sq = true; j += 1; continue; }
+                b'"'  => { in_dq = true; j += 1; continue; }
+                b'`'  => { in_bt = true; j += 1; continue; }
+                b'V' | b'v' => {
+                    // Check for VALUES (case-insensitive) followed by whitespace or '('
+                    if j + 6 < len {
+                        let candidate = &bytes[j..j + 6];
+                        if candidate.eq_ignore_ascii_case(b"VALUES") {
+                            let after = bytes[j + 6];
+                            if after == b' ' || after == b'\t' || after == b'\n' || after == b'(' {
+                                found = Some(j);
+                                break;
+                            }
+                        }
+                    }
+                    j += 1; continue;
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        match found {
+            Some(pos) => pos,
+            None => return vec![stmt.to_string()], // not a VALUES INSERT
+        }
+    };
+
+    // Extract the header: everything up to and including "VALUES"
+    let header_end = values_start + 6; // byte offset just past "VALUES"
+    let header = &stmt[..header_end];
+
+    // Find the first '(' of the first value row (skip whitespace after VALUES)
+    let rows_start = {
+        let mut k = header_end;
+        while k < len && (bytes[k] == b' ' || bytes[k] == b'\t' || bytes[k] == b'\n') {
+            k += 1;
+        }
+        if k >= len || bytes[k] != b'(' {
+            return vec![stmt.to_string()]; // malformed or INSERT ... SELECT
+        }
+        k
+    };
+
+    // Split the values section into individual row tuples by tracking paren
+    // depth and string state. Each row is the byte range of one `(...)` group.
+    let values_section = &stmt[rows_start..];
+    let vbytes = values_section.as_bytes();
+    let vlen = vbytes.len();
+    let mut rows: Vec<&str> = Vec::new();
+    let mut j = 0;
+    let mut depth: usize = 0;
+    let mut row_start = 0;
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut in_bt = false;
+    let mut esc = false;
+
+    while j < vlen {
+        if esc { esc = false; j += 1; continue; }
+        let b = vbytes[j];
+        if in_sq {
+            if b == b'\\' { esc = true; }
+            else if b == b'\'' {
+                if j + 1 < vlen && vbytes[j + 1] == b'\'' { j += 2; continue; }
+                in_sq = false;
+            }
+            j += 1; continue;
+        }
+        if in_dq {
+            if b == b'\\' { esc = true; }
+            else if b == b'"' {
+                if j + 1 < vlen && vbytes[j + 1] == b'"' { j += 2; continue; }
+                in_dq = false;
+            }
+            j += 1; continue;
+        }
+        if in_bt {
+            if b == b'`' { in_bt = false; }
+            j += 1; continue;
+        }
+        match b {
+            b'\'' => { in_sq = true; }
+            b'"'  => { in_dq = true; }
+            b'`'  => { in_bt = true; }
+            b'('  => {
+                if depth == 0 { row_start = j; }
+                depth += 1;
+            }
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    // End of a row tuple — record the slice
+                    rows.push(&values_section[row_start..=j]);
+                    // Skip comma and whitespace between rows
+                    let mut k = j + 1;
+                    while k < vlen && (vbytes[k] == b',' || vbytes[k] == b' ' || vbytes[k] == b'\n' || vbytes[k] == b'\r') {
+                        k += 1;
+                    }
+                    j = k;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+
+    // Not worth chunking
+    if rows.len() <= INSERT_CHUNK_ROWS {
+        return vec![stmt.to_string()];
+    }
+
+    // Reconstruct as multiple INSERT statements
+    rows.chunks(INSERT_CHUNK_ROWS)
+        .map(|chunk| format!("{} {}", header, chunk.join(",")))
+        .collect()
 }
 
 // --- Import logic ---
@@ -310,10 +506,35 @@ async fn do_import(
 
     let reader = std::io::BufReader::with_capacity(1024 * 1024, file);
 
-    // USE database if specified
+    // Acquire a dedicated connection for the entire import operation.
+    // This ensures that USE `database` and all subsequent statements run on the
+    // same physical connection — without this, each .execute() call could pick a
+    // different connection from the pool and lose the session-level database selection.
+    let mut conn = match pool.acquire().await {
+        Ok(c) => c,
+        Err(e) => {
+            emit_progress(&app, &ImportProgressPayload {
+                operation_id: operation_id.clone(),
+                phase: "error".to_string(),
+                bytes_read: 0,
+                bytes_total,
+                statements_executed: 0,
+                errors_count: 0,
+                current_statement_preview: String::new(),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Cannot acquire connection: {}", e)),
+            });
+            unregister_cancel(&operation_id);
+            return;
+        }
+    };
+
+    // USE database if specified.
+    // Must use raw_sql (simple query protocol) — USE is not supported in the prepared
+    // statement protocol and would fail with error 1295 (HY000).
     if !options.database.is_empty() {
         let use_sql = format!("USE `{}`", options.database.replace('`', "``"));
-        if let Err(e) = sqlx::query(&use_sql).execute(&pool).await {
+        if let Err(e) = sqlx::raw_sql(&use_sql).execute(&mut *conn).await {
             emit_progress(&app, &ImportProgressPayload {
                 operation_id: operation_id.clone(),
                 phase: "error".to_string(),
@@ -359,72 +580,104 @@ async fn do_import(
                 let stmts = parser.feed_line(&line);
 
                 for stmt in stmts {
-                    if cancel.load(Ordering::Relaxed) {
-                        emit_progress(&app, &ImportProgressPayload {
-                            operation_id: operation_id.clone(),
-                            phase: "cancelled".to_string(),
-                            bytes_read,
-                            bytes_total,
-                            statements_executed,
-                            errors_count,
-                            current_statement_preview: String::new(),
-                            elapsed_ms: start.elapsed().as_millis() as u64,
-                            error: None,
-                        });
-                        unregister_cancel(&operation_id);
-                        return;
-                    }
-
                     // Skip pure comment/conditional wrappers
                     let trimmed = stmt.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
 
-                    let preview: String = if trimmed.len() > 100 {
-                        format!("{}...", &trimmed[..100])
-                    } else {
-                        trimmed.to_string()
-                    };
+                    // Split large INSERT ... VALUES statements into chunks of
+                    // INSERT_CHUNK_ROWS rows each. For all other statement types
+                    // this returns a single-element vec with the original stmt.
+                    let chunks = split_insert_chunks(trimmed);
 
-                    match sqlx::query(trimmed).execute(&pool).await {
-                        Ok(_) => {
-                            statements_executed += 1;
+                    for chunk in &chunks {
+                        if cancel.load(Ordering::Relaxed) {
+                            emit_progress(&app, &ImportProgressPayload {
+                                operation_id: operation_id.clone(),
+                                phase: "cancelled".to_string(),
+                                bytes_read,
+                                bytes_total,
+                                statements_executed,
+                                errors_count,
+                                current_statement_preview: String::new(),
+                                elapsed_ms: start.elapsed().as_millis() as u64,
+                                error: None,
+                            });
+                            unregister_cancel(&operation_id);
+                            return;
                         }
-                        Err(e) => {
-                            errors_count += 1;
-                            if options.stop_on_error {
-                                emit_progress(&app, &ImportProgressPayload {
-                                    operation_id: operation_id.clone(),
-                                    phase: "error".to_string(),
-                                    bytes_read,
-                                    bytes_total,
-                                    statements_executed,
-                                    errors_count,
-                                    current_statement_preview: preview,
-                                    elapsed_ms: start.elapsed().as_millis() as u64,
-                                    error: Some(e.to_string()),
-                                });
-                                unregister_cancel(&operation_id);
-                                return;
+
+                        let chunk_trimmed = chunk.trim();
+                        if chunk_trimmed.is_empty() {
+                            continue;
+                        }
+
+                        let preview: String = if chunk_trimmed.len() > 100 {
+                            format!("{}...", &chunk_trimmed[..100])
+                        } else {
+                            chunk_trimmed.to_string()
+                        };
+
+                        // Pre-execute emit — fires before MySQL starts processing
+                        // so the UI reflects the current bytes_read and the
+                        // statement about to run even during long executions.
+                        if last_progress.elapsed().as_millis() >= 250 {
+                            emit_progress(&app, &ImportProgressPayload {
+                                operation_id: operation_id.clone(),
+                                phase: "executing".to_string(),
+                                bytes_read,
+                                bytes_total,
+                                statements_executed,
+                                errors_count,
+                                current_statement_preview: preview.clone(),
+                                elapsed_ms: start.elapsed().as_millis() as u64,
+                                error: None,
+                            });
+                            last_progress = std::time::Instant::now();
+                        }
+
+                        // raw_sql uses the simple query protocol, which supports all MySQL
+                        // statements (DDL, SET, USE, etc.) — unlike prepared statements.
+                        match sqlx::raw_sql(chunk_trimmed).execute(&mut *conn).await {
+                            Ok(_) => {
+                                statements_executed += 1;
+                            }
+                            Err(e) => {
+                                errors_count += 1;
+                                if options.stop_on_error {
+                                    emit_progress(&app, &ImportProgressPayload {
+                                        operation_id: operation_id.clone(),
+                                        phase: "error".to_string(),
+                                        bytes_read,
+                                        bytes_total,
+                                        statements_executed,
+                                        errors_count,
+                                        current_statement_preview: preview,
+                                        elapsed_ms: start.elapsed().as_millis() as u64,
+                                        error: Some(e.to_string()),
+                                    });
+                                    unregister_cancel(&operation_id);
+                                    return;
+                                }
                             }
                         }
-                    }
 
-                    // Throttled progress
-                    if statements_executed % 100 == 0 || last_progress.elapsed().as_millis() >= 500 {
-                        emit_progress(&app, &ImportProgressPayload {
-                            operation_id: operation_id.clone(),
-                            phase: "executing".to_string(),
-                            bytes_read,
-                            bytes_total,
-                            statements_executed,
-                            errors_count,
-                            current_statement_preview: preview.clone(),
-                            elapsed_ms: start.elapsed().as_millis() as u64,
-                            error: None,
-                        });
-                        last_progress = std::time::Instant::now();
+                        // Post-execute emit — updates the statement counter in the UI.
+                        if statements_executed % 100 == 0 || last_progress.elapsed().as_millis() >= 500 {
+                            emit_progress(&app, &ImportProgressPayload {
+                                operation_id: operation_id.clone(),
+                                phase: "executing".to_string(),
+                                bytes_read,
+                                bytes_total,
+                                statements_executed,
+                                errors_count,
+                                current_statement_preview: preview.clone(),
+                                elapsed_ms: start.elapsed().as_millis() as u64,
+                                error: None,
+                            });
+                            last_progress = std::time::Instant::now();
+                        }
                     }
                 }
             }
@@ -456,7 +709,7 @@ async fn do_import(
                 trimmed.to_string()
             };
 
-            match sqlx::query(trimmed).execute(&pool).await {
+            match sqlx::raw_sql(trimmed).execute(&mut *conn).await {
                 Ok(_) => {
                     statements_executed += 1;
                 }
@@ -511,11 +764,28 @@ pub async fn start_import(
     let cancel = register_cancel(&operation_id);
     let op_id = operation_id.clone();
 
-    tokio::spawn(async move {
-        do_import(pool, options, app, op_id, cancel).await;
+    // do_import mixes sync file I/O with async MySQL I/O, and internally uses
+    // `&mut *conn` (PoolConnection deref) as the sqlx Executor.  Using raw
+    // `tokio::spawn` would require the future to be `Send`, which triggers an
+    // unsatisfiable HRTB on `Executor<'_>` for `&mut MySqlConnection`.
+    // `spawn_blocking` + `Handle::block_on` is the correct model for tasks that
+    // combine blocking I/O (file reads) with async I/O (DB statements): the
+    // future runs on a dedicated blocking thread with the Tokio runtime handle,
+    // avoiding the `Send` requirement entirely.
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        handle.block_on(do_import(pool, options, app, op_id, cancel));
     });
 
     Ok(operation_id)
+}
+
+#[tauri::command]
+pub fn get_import_progress(operation_id: String) -> Option<ImportProgressPayload> {
+    IMPORT_PROGRESS_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&operation_id).cloned())
 }
 
 #[tauri::command]

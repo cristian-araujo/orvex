@@ -12,7 +12,7 @@ function basename(path: string): string {
 }
 
 export function ImportDialog() {
-  const { connectionId, selectedDatabase, setShowImportDialog, setActiveOperation } =
+  const { connectionId, selectedDatabase, setShowImportDialog, setActiveOperation, importDefaultDirectory } =
     useAppStore(useShallow((s) => {
       const session = getActiveSession(s);
       return {
@@ -20,6 +20,7 @@ export function ImportDialog() {
         selectedDatabase: session?.selectedDatabase ?? null,
         setShowImportDialog: s.setShowImportDialog,
         setActiveOperation: s.setActiveOperation,
+        importDefaultDirectory: s.settings.import_default_directory,
       };
     }));
 
@@ -33,6 +34,7 @@ export function ImportDialog() {
     const path = await open({
       multiple: false,
       filters: [{ name: "SQL / Dump", extensions: ["sql", "dump", "txt"] }],
+      defaultPath: importDefaultDirectory || undefined,
     });
     if (path) setFilePath(path);
   };

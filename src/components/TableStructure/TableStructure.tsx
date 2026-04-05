@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgGridReact } from "ag-grid-react";
 import type { ColDef } from "ag-grid-community";
@@ -98,7 +98,7 @@ export function TableStructure({ database, table }: Props) {
     return () => { cancelled = true; };
   }, [database, table, activeConnectionId]);
 
-  const loadData = async (p: number) => {
+  const loadData = useCallback(async (p: number) => {
     setIsLoading(true);
     setError(null);
     try {
@@ -116,7 +116,20 @@ export function TableStructure({ database, table }: Props) {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [activeConnectionId, database, table]);
+
+  // F5 → reload data tab
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "F5" && activeTab === "data"
+          && !document.activeElement?.closest(".monaco-editor")) {
+        e.preventDefault();
+        loadData(page);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [activeTab, page, loadData]);
 
   const colDefs = useMemo<ColDef[]>(() => {
     if (!dataResult?.columns.length) return [];
@@ -172,6 +185,15 @@ export function TableStructure({ database, table }: Props) {
                 {dataResult.rows.length} rows · page {page + 1}
               </span>
             )}
+            <button
+              className="btn-secondary"
+              style={{ padding: "2px 8px", fontSize: 11 }}
+              onClick={() => loadData(page)}
+              disabled={isLoading}
+              title="Refresh data (F5)"
+            >
+              {isLoading ? <span className="spinner spinner-sm" /> : "⟳"}
+            </button>
             <button className="btn-secondary" style={{ padding: "2px 8px", fontSize: 11 }}
               onClick={() => loadData(Math.max(0, page - 1))} disabled={page === 0 || isLoading}>
               ← Prev

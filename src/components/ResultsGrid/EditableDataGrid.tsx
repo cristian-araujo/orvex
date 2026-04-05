@@ -1,10 +1,40 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, CellValueChangedEvent, CellClassParams, CellDoubleClickedEvent, CellKeyDownEvent, GridApi } from "ag-grid-community";
+import type { ColDef, CellValueChangedEvent, CellClassParams, CellDoubleClickedEvent, CellKeyDownEvent, CellContextMenuEvent, GridApi } from "ag-grid-community";
 import { themeAlpine, colorSchemeDark } from "ag-grid-community";
 import { invoke } from "@tauri-apps/api/core";
+import { useShallow } from "zustand/react/shallow";
+import { useAppStore } from "../../store/useAppStore";
 import { ConfirmDialog } from "./ConfirmDialog";
-import type { ColumnInfo, QueryResult, TableEditOperation, TableEditRequest, ApplyEditsResult } from "../../types";
+import type { ColumnInfo, QueryResult, TableEditOperation, TableEditRequest, ApplyEditsResult, DatetimeDisplayFormat } from "../../types";
+
+function formatDatetimeValue(value: unknown, colInfo: ColumnInfo | undefined, fmt: DatetimeDisplayFormat): string {
+  const str = String(value);
+  if (!colInfo) return str;
+  const t = colInfo.column_type.toLowerCase();
+
+  if (t.includes("datetime") || t.includes("timestamp")) {
+    const match = str.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/);
+    if (match) {
+      const [, y, mo, d, h, mi, s] = match;
+      if (fmt === "eu") return `${d}/${mo}/${y} ${h}:${mi}:${s}`;
+      if (fmt === "us") return `${mo}/${d}/${y} ${h}:${mi}:${s}`;
+      return str;
+    }
+  }
+
+  if (t === "date") {
+    const match = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) {
+      const [, y, mo, d] = match;
+      if (fmt === "eu") return `${d}/${mo}/${y}`;
+      if (fmt === "us") return `${mo}/${d}/${y}`;
+      return str;
+    }
+  }
+
+  return str;
+}
 
 const darkTheme = themeAlpine.withPart(colorSchemeDark);
 
@@ -27,6 +57,15 @@ interface TextEditorState {
   column: string;
   text: string;
   nullable: boolean;
+}
+
+interface CellContextMenuState {
+  x: number;
+  y: number;
+  rowIndex: number;
+  column: string;
+  isAlreadyNull: boolean;
+  isInserted: boolean;
 }
 
 interface EditableDataGridProps {
@@ -120,6 +159,12 @@ export function EditableDataGrid({
   quickFilterText,
   onGridReady,
 }: EditableDataGridProps) {
+  const { nullDisplayText, gridRowHeight, datetimeFormat } = useAppStore(useShallow((s) => ({
+    nullDisplayText: s.settings.null_display_text,
+    gridRowHeight: s.settings.grid_row_height,
+    datetimeFormat: s.settings.datetime_display_format,
+  })));
+
   const gridRef = useRef<AgGridReact>(null);
   const originalRowCount = result.rows.length;
 
@@ -131,6 +176,7 @@ export function EditableDataGrid({
   const [applyError, setApplyError] = useState<string | null>(null);
   const [jsonEditor, setJsonEditor] = useState<JsonEditorState | null>(null);
   const [textEditor, setTextEditor] = useState<TextEditorState | null>(null);
+  const [cellContextMenu, setCellContextMenu] = useState<CellContextMenuState | null>(null);
 
   // Reset edit state when the underlying data changes (user clicked a different table)
   useEffect(() => {
@@ -140,6 +186,7 @@ export function EditableDataGrid({
     setApplyError(null);
     setJsonEditor(null);
     setTextEditor(null);
+    setCellContextMenu(null);
   }, [result]);
 
   const hasPk = primaryKeys.length > 0;
@@ -216,13 +263,15 @@ export function EditableDataGrid({
           }
           return base;
         },
-        valueFormatter: (params: { value: unknown }) =>
-          params.value === null || params.value === undefined ? "NULL" : String(params.value),
+        valueFormatter: (params: { value: unknown }) => {
+          if (params.value === null || params.value === undefined) return nullDisplayText;
+          return formatDatetimeValue(params.value, colInfo, datetimeFormat);
+        },
       };
     });
 
     return dataCols;
-  }, [result.columns, columnInfos, originalRowCount, deletedIndices, editedCells]);
+  }, [result.columns, columnInfos, originalRowCount, deletedIndices, editedCells, nullDisplayText, datetimeFormat]);
 
   // Double-click handler for JSON and TEXT columns — opens modal editor
   const onCellDoubleClicked = useCallback((event: CellDoubleClickedEvent) => {
@@ -338,6 +387,57 @@ export function EditableDataGrid({
       navigator.clipboard.writeText(text).catch(console.error);
     }
   }, []);
+
+  const onCellContextMenu = useCallback((event: CellContextMenuEvent) => {
+    event.event?.preventDefault();
+    const col = event.colDef.field;
+    if (!col) return;
+    const colInfo = columnInfos.find((c) => c.field === col);
+    // Only show the menu for nullable, editable columns
+    if (!colInfo || !colInfo.nullable) return;
+    const rowIdx = event.data.__rowIndex as number;
+    if (deletedIndices.has(rowIdx)) return;
+    const isInserted = rowIdx >= originalRowCount;
+    if (!isColumnEditable(colInfo, isInserted)) return;
+
+    const mouseEvent = event.event as MouseEvent;
+    const x = Math.min(mouseEvent.clientX, window.innerWidth - 170);
+    const y = Math.min(mouseEvent.clientY, window.innerHeight - 70);
+    setCellContextMenu({
+      x,
+      y,
+      rowIndex: rowIdx,
+      column: col,
+      isAlreadyNull: event.value === null || event.value === undefined,
+      isInserted,
+    });
+  }, [columnInfos, deletedIndices, originalRowCount]);
+
+  const handleSetNull = useCallback(() => {
+    if (!cellContextMenu) return;
+    const { rowIndex, column, isInserted } = cellContextMenu;
+    if (isInserted) {
+      const insertIdx = rowIndex - originalRowCount;
+      setInsertedRows((prev) => {
+        const next = [...prev];
+        next[insertIdx] = { ...next[insertIdx], [column]: null };
+        return next;
+      });
+    } else {
+      const key = `${rowIndex}:${column}`;
+      const originalValue = originalData[rowIndex][column];
+      setEditedCells((prev) => {
+        const next = new Map(prev);
+        if (originalValue === null) {
+          next.delete(key);
+        } else {
+          next.set(key, { rowIndex, column, originalValue, newValue: null });
+        }
+        return next;
+      });
+    }
+    setCellContextMenu(null);
+  }, [cellContextMenu, originalRowCount, originalData]);
 
   const onCellValueChanged = useCallback((event: CellValueChangedEvent) => {
     const rowIdx = event.data.__rowIndex as number;
@@ -580,7 +680,7 @@ export function EditableDataGrid({
       </div>
 
       {/* Grid */}
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: 1 }} onContextMenu={(e) => e.preventDefault()}>
         <AgGridReact
           ref={gridRef}
           theme={darkTheme}
@@ -592,12 +692,13 @@ export function EditableDataGrid({
             resizable: true,
             filterParams: { buttons: ["apply", "reset"], closeOnApply: true },
           }}
-          rowHeight={24}
+          rowHeight={gridRowHeight}
           headerHeight={28}
           stopEditingWhenCellsLoseFocus={true}
           onCellValueChanged={onCellValueChanged}
           onCellKeyDown={onCellKeyDown}
           onCellDoubleClicked={onCellDoubleClicked}
+          onCellContextMenu={onCellContextMenu}
           onFilterChanged={(e) => onFilterChanged?.(e.api)}
           onGridReady={(e) => onGridReady?.(e.api)}
           quickFilterText={quickFilterText}
@@ -787,6 +888,86 @@ export function EditableDataGrid({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Cell context menu */}
+      {cellContextMenu && (
+        <>
+          {/* Backdrop: closes menu when clicking outside */}
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 199 }}
+            onMouseDown={() => setCellContextMenu(null)}
+            onContextMenu={(e) => { e.preventDefault(); setCellContextMenu(null); }}
+          />
+          <div
+            style={{
+              position: "fixed",
+              left: cellContextMenu.x,
+              top: cellContextMenu.y,
+              zIndex: 200,
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              boxShadow: "0 4px 16px rgba(0,0,0,0.45)",
+              padding: "2px 0",
+              minWidth: 160,
+              fontSize: 12,
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                padding: "4px 10px 4px",
+                color: "var(--text-muted)",
+                fontSize: 11,
+                borderBottom: "1px solid var(--border)",
+                marginBottom: 2,
+                fontFamily: "monospace",
+              }}
+            >
+              {cellContextMenu.column}
+            </div>
+            <button
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                width: "100%",
+                padding: "5px 10px",
+                background: "none",
+                border: "none",
+                cursor: cellContextMenu.isAlreadyNull ? "default" : "pointer",
+                color: cellContextMenu.isAlreadyNull ? "var(--text-muted)" : "var(--text)",
+                fontSize: 12,
+                textAlign: "left",
+                opacity: cellContextMenu.isAlreadyNull ? 0.5 : 1,
+              }}
+              onClick={cellContextMenu.isAlreadyNull ? undefined : handleSetNull}
+              disabled={cellContextMenu.isAlreadyNull}
+            >
+              <span
+                style={{
+                  fontFamily: "monospace",
+                  fontSize: 10,
+                  background: "var(--bg-surface)",
+                  padding: "1px 5px",
+                  borderRadius: 3,
+                  color: "var(--text-muted)",
+                  border: "1px solid var(--border)",
+                  letterSpacing: "0.03em",
+                }}
+              >
+                NULL
+              </span>
+              Set to NULL
+              {cellContextMenu.isAlreadyNull && (
+                <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-muted)", paddingLeft: 8 }}>
+                  already null
+                </span>
+              )}
+            </button>
+          </div>
+        </>
       )}
 
       {/* No PK warning dialog */}

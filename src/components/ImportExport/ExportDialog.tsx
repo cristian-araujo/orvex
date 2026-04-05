@@ -5,10 +5,25 @@ import { useShallow } from "zustand/react/shallow";
 import { useAppStore, getActiveSession } from "../../store/useAppStore";
 import type { ExportFormat, ExportContent, ExportOptions } from "../../types";
 
+export function resolveFilenameTemplate(
+  template: string,
+  ctx: { database: string; tables: string[]; format: ExportFormat },
+): string {
+  const now = new Date();
+  const date = now.toISOString().slice(0, 10);
+  const datetime = now.toISOString().slice(0, 19).replace(/T/, "_").replace(/:/g, "");
+  const table = ctx.tables.length === 1 ? ctx.tables[0] : ctx.database;
+  return template
+    .replace(/{database}/g, ctx.database)
+    .replace(/{table}/g, table)
+    .replace(/{date}/g, date)
+    .replace(/{datetime}/g, datetime)
+    .replace(/{format}/g, ctx.format.toLowerCase());
+}
 
 
-// Thin custom checkbox that matches the tool's aesthetic
-function Tick({ checked, onChange }: { checked: boolean; onChange: () => void }) {
+
+export function Tick({ checked, onChange }: { checked: boolean; onChange: () => void }) {
   return (
     <div
       onClick={onChange}
@@ -60,7 +75,7 @@ const SQL_OPTIONS: { key: string; label: string }[] = [
 ];
 
 export function ExportDialog() {
-  const { connectionId, selectedDatabase, setShowExportDialog, setActiveOperation } =
+  const { connectionId, selectedDatabase, setShowExportDialog, setActiveOperation, settings } =
     useAppStore(useShallow((s) => {
       const session = getActiveSession(s);
       return {
@@ -68,11 +83,14 @@ export function ExportDialog() {
         selectedDatabase: session?.selectedDatabase ?? null,
         setShowExportDialog: s.setShowExportDialog,
         setActiveOperation: s.setActiveOperation,
+        settings: s.settings,
       };
     }));
 
-  const [format, setFormat] = useState<ExportFormat>("Sql");
-  const [content, setContent] = useState<ExportContent>("StructureAndData");
+  const sqlDefs = settings.export_default_sql_options;
+
+  const [format, setFormat] = useState<ExportFormat>(settings.export_default_format);
+  const [content, setContent] = useState<ExportContent>(settings.export_default_content);
   const [database, setDatabase] = useState(selectedDatabase ?? "");
   const [tableFilter, setTableFilter] = useState("");
   const [availableTables, setAvailableTables] = useState<string[]>([]);
@@ -82,17 +100,17 @@ export function ExportDialog() {
   const [starting, setStarting] = useState(false);
 
   const [sqlOpts, setSqlOpts] = useState({
-    dropTable: true,
-    dropDatabase: false,
-    createDatabase: false,
-    lockTables: true,
-    disableForeignKeys: true,
-    setNames: true,
-    addTimestamps: true,
-    hexBinary: true,
-    extendedInserts: true,
+    dropTable: sqlDefs.drop_table,
+    dropDatabase: sqlDefs.drop_database,
+    createDatabase: sqlDefs.create_database,
+    lockTables: sqlDefs.lock_tables,
+    disableForeignKeys: sqlDefs.disable_foreign_keys,
+    setNames: sqlDefs.set_names,
+    addTimestamps: sqlDefs.add_timestamps,
+    hexBinary: sqlDefs.hex_binary,
+    extendedInserts: sqlDefs.extended_inserts,
   });
-  const [extendedInsertRows, setExtendedInsertRows] = useState(1000);
+  const [extendedInsertRows, setExtendedInsertRows] = useState(sqlDefs.extended_insert_rows);
 
   const dbDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -128,8 +146,16 @@ export function ExportDialog() {
   const handleExport = async () => {
     if (!connectionId || !database || selectedTables.size === 0) return;
     const meta = FORMAT_META.find((f) => f.id === format)!;
+    const filename = resolveFilenameTemplate(settings.export_filename_template, {
+      database,
+      tables: [...selectedTables],
+      format,
+    });
+    const defaultPath = settings.export_default_directory
+      ? `${settings.export_default_directory}/${filename}.${meta.ext}`
+      : `${filename}.${meta.ext}`;
     const filePath = await save({
-      defaultPath: `${database}.${meta.ext}`,
+      defaultPath,
       filters: [{ name: meta.label, extensions: [meta.ext] }],
     });
     if (!filePath) return;

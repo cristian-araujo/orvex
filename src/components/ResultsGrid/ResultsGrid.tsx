@@ -12,7 +12,7 @@ import type { QueryResult } from "../../types";
 
 const darkTheme = themeAlpine.withPart(colorSchemeDark);
 
-function buildColDefs(result: QueryResult | null): ColDef[] {
+function buildColDefs(result: QueryResult | null, nullDisplayText: string): ColDef[] {
   if (!result?.columns.length) return [];
   return result.columns.map((col) => ({
     field: col,
@@ -28,7 +28,7 @@ function buildColDefs(result: QueryResult | null): ColDef[] {
         : {}),
     }),
     valueFormatter: (params: { value: unknown }) =>
-      params.value === null || params.value === undefined ? "NULL" : String(params.value),
+      params.value === null || params.value === undefined ? nullDisplayText : String(params.value),
   }));
 }
 
@@ -51,7 +51,11 @@ interface DataGridProps {
 
 const DataGrid = forwardRef<AgGridReact, DataGridProps>(
   function DataGrid({ result, quickFilterText, onFilterChanged }, ref) {
-    const colDefs = useMemo(() => buildColDefs(result), [result?.columns]);
+    const { nullDisplayText, gridRowHeight } = useAppStore(useShallow((s) => ({
+      nullDisplayText: s.settings.null_display_text,
+      gridRowHeight: s.settings.grid_row_height,
+    })));
+    const colDefs = useMemo(() => buildColDefs(result, nullDisplayText), [result?.columns, nullDisplayText]);
     const rowData = useMemo(() => buildRowData(result), [result]);
 
     return (
@@ -67,7 +71,7 @@ const DataGrid = forwardRef<AgGridReact, DataGridProps>(
             resizable: true,
             filterParams: { buttons: ["apply", "reset"], closeOnApply: true },
           }}
-          rowHeight={24}
+          rowHeight={gridRowHeight}
           headerHeight={28}
           suppressCellFocus={false}
           enableCellTextSelection={true}
@@ -281,24 +285,6 @@ export function ResultsGrid() {
     }
   }, [activeBottomTab, getCurrentGridApi, extractFilterState]);
 
-  // Ctrl+F → focus filter input
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
-        if (activeBottomTab === "data" || activeBottomTab === "results") {
-          e.preventDefault();
-          filterInputRef.current?.focus();
-          filterInputRef.current?.select();
-        }
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeBottomTab]);
-
-  // Determine which result to show stats for in the tab bar
-  const visibleResult = activeBottomTab === "data" ? dataResult : queryResult;
-
   // Reload data after apply — mantiene la página actual
   const handleDataReload = useCallback(async () => {
     if (!activeConnectionId || !dataDatabase || !dataTable) return;
@@ -337,6 +323,29 @@ export function ResultsGrid() {
       setLoadingData(false);
     }
   }, [activeConnectionId, dataDatabase, dataTable, setDataResult, setColumns, setLoadingData, setDataTotalRows]);
+
+  // Ctrl+F → focus filter input; F5 → reload data tab
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        if (activeBottomTab === "data" || activeBottomTab === "results") {
+          e.preventDefault();
+          filterInputRef.current?.focus();
+          filterInputRef.current?.select();
+        }
+      }
+      if (e.key === "F5" && activeBottomTab === "data" && dataResult
+          && !document.activeElement?.closest(".monaco-editor")) {
+        e.preventDefault();
+        handleDataReload();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeBottomTab, dataResult, handleDataReload]);
+
+  // Determine which result to show stats for in the tab bar
+  const visibleResult = activeBottomTab === "data" ? dataResult : queryResult;
 
   // Navegar páginas del data preview
   const loadDataPage = useCallback(async (page: number) => {
@@ -413,6 +422,15 @@ export function ResultsGrid() {
             alignItems: "center",
             gap: 6,
           }}>
+            <button
+              className="btn-secondary"
+              onClick={handleDataReload}
+              disabled={isLoadingData}
+              title="Refresh data (F5)"
+              style={{ padding: "1px 6px", fontSize: 11 }}
+            >
+              {isLoadingData ? <span className="spinner spinner-sm" /> : "⟳"}
+            </button>
             <button
               className="btn-secondary"
               disabled={dataPage === 0 || isLoadingData}

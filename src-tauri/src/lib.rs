@@ -40,6 +40,9 @@ pub fn run() {
             get_table_data,
             apply_table_edits,
             // Schema
+            get_charsets,
+            get_collations,
+            create_database,
             get_databases,
             get_tables,
             get_columns,
@@ -51,11 +54,15 @@ pub fn run() {
             // Session
             save_session_state,
             load_session_state,
+            save_settings,
+            load_settings,
             // Export/Import
             start_export,
             cancel_export,
+            get_export_progress,
             start_import,
             cancel_import,
+            get_import_progress,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

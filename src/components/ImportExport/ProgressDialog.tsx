@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "../../store/useAppStore";
@@ -80,6 +80,11 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
   const [importProgress, setImportProgress] = useState<ImportProgressPayload | null>(null);
   const [cancelling, setCancelling] = useState(false);
 
+  // Local elapsed timer — advances every 250ms independently of backend events
+  // so the clock keeps running even when MySQL is executing a long statement.
+  const [localElapsedMs, setLocalElapsedMs] = useState(0);
+  const localElapsedRef = useRef(0);
+
   useEffect(() => {
     const eventName = type === "export" ? "export-progress" : "import-progress";
     const unlisten = listen<ExportProgressPayload | ImportProgressPayload>(eventName, (event) => {
@@ -91,13 +96,53 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
       } else {
         setImportProgress(payload as ImportProgressPayload);
       }
-
     });
+
+    // The backend task starts immediately after the invoke returns, before React has time to mount
+    // this component and register the listener above. Early events (e.g. a USE-database failure
+    // that happens in <20ms) are therefore lost. We recover by fetching the latest cached payload
+    // from the backend on mount, applying it only if no live event has already been received.
+    const cacheCmd = type === "export" ? "get_export_progress" : "get_import_progress";
+    invoke<ExportProgressPayload | ImportProgressPayload | null>(cacheCmd, { operationId })
+      .then((cached) => {
+        if (!cached) return;
+        if (type === "export") {
+          setExportProgress((prev) => prev ?? (cached as ExportProgressPayload));
+        } else {
+          setImportProgress((prev) => prev ?? (cached as ImportProgressPayload));
+        }
+      })
+      .catch(() => { /* cache miss is benign */ });
 
     return () => {
       unlisten.then((fn) => fn());
     };
   }, [type, operationId, setActiveOperation]);
+
+  // Sync local elapsed with backend value whenever an event arrives
+  useEffect(() => {
+    const backendMs = (type === "import" ? importProgress?.elapsed_ms : exportProgress?.elapsed_ms) ?? 0;
+    if (backendMs > localElapsedRef.current) {
+      localElapsedRef.current = backendMs;
+      setLocalElapsedMs(backendMs);
+    }
+  }, [importProgress?.elapsed_ms, exportProgress?.elapsed_ms, type]);
+
+  // Tick every 250ms while operation is running so the clock never freezes
+  useEffect(() => {
+    const phase = (type === "import" ? importProgress?.phase : exportProgress?.phase) ?? "starting";
+    const terminal = phase === "complete" || phase === "error" || phase === "cancelled";
+    if (terminal) return;
+    const id = setInterval(() => {
+      localElapsedRef.current += 250;
+      setLocalElapsedMs(localElapsedRef.current);
+    }, 250);
+    return () => clearInterval(id);
+  }, [
+    type,
+    importProgress?.phase,
+    exportProgress?.phase,
+  ]);
 
   const handleCancel = async () => {
     setCancelling(true);
@@ -297,7 +342,7 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
                   value={
                     isTerminal
                       ? formatDuration(exportProgress.elapsed_ms)
-                      : `${formatDuration(exportProgress.elapsed_ms)} / ${formatEta(exportProgress.elapsed_ms, progressPercent)}`
+                      : `${formatDuration(localElapsedMs)} / ${formatEta(localElapsedMs, progressPercent)}`
                   }
                 />
               </div>
@@ -330,7 +375,7 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
                   value={
                     isTerminal
                       ? formatDuration(importProgress.elapsed_ms)
-                      : `${formatDuration(importProgress.elapsed_ms)} / ${formatEta(importProgress.elapsed_ms, progressPercent)}`
+                      : `${formatDuration(localElapsedMs)} / ${formatEta(localElapsedMs, progressPercent)}`
                   }
                 />
                 {importProgress.current_statement_preview && (

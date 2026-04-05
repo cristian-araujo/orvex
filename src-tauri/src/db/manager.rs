@@ -1,6 +1,7 @@
 use sqlx::{MySql, Pool, mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode}};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 use crate::models::ConnectionConfig;
 use crate::ssh::tunnel::SshTunnel;
 
@@ -79,6 +80,9 @@ impl ConnectionManager {
         let pool = match MySqlPoolOptions::new()
             .min_connections(2)
             .max_connections(5)
+            .acquire_timeout(Duration::from_secs(10))
+            .idle_timeout(Duration::from_secs(300))
+            .max_lifetime(Duration::from_secs(1800))
             .connect_with(opts)
             .await
         {

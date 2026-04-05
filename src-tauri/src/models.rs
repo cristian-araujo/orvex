@@ -202,6 +202,15 @@ pub struct ImportProgressPayload {
     pub error: Option<String>,
 }
 
+// --- Charset / Collation ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CharsetInfo {
+    pub charset: String,
+    pub description: String,
+    pub default_collation: String,
+}
+
 // --- Data editing ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

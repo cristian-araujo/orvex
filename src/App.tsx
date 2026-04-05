@@ -16,7 +16,9 @@ import { useClipboardFix } from "./hooks/useClipboardFix";
 import { ExportDialog } from "./components/ImportExport/ExportDialog";
 import { ImportDialog } from "./components/ImportExport/ImportDialog";
 import { ProgressDialog } from "./components/ImportExport/ProgressDialog";
-import type { ConnectionConfig } from "./types";
+import { SettingsDialog } from "./components/Settings/SettingsDialog";
+import type { ConnectionConfig, AppSettings } from "./types";
+import { DEFAULT_SETTINGS } from "./types";
 
 function QueryTabs() {
   const { queryTabs, activeTabId, activeConnectionId, selectedDatabase } = useAppStore(useShallow(s => {
@@ -194,12 +196,13 @@ function ActiveTabContent() {
 }
 
 export default function App() {
-  const { showConnectionDialog, showExportDialog, showImportDialog, activeOperation, activeConnectionId, sessions } = useAppStore(useShallow(s => {
+  const { showConnectionDialog, showExportDialog, showImportDialog, showSettingsDialog, activeOperation, activeConnectionId, sessions } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
       showConnectionDialog: s.showConnectionDialog,
       showExportDialog: s.showExportDialog,
       showImportDialog: s.showImportDialog,
+      showSettingsDialog: s.showSettingsDialog,
       activeOperation: s.activeOperation,
       activeConnectionId: session?.connectionId ?? null,
       sessions: s.sessions,
@@ -218,6 +221,23 @@ export default function App() {
     initRef.current = true;
 
     async function init() {
+      // Load persisted settings and merge with defaults (tolerates new fields added in newer versions)
+      try {
+        const saved = await invoke<Record<string, unknown>>("load_settings");
+        const merged: AppSettings = {
+          ...DEFAULT_SETTINGS,
+          ...saved,
+          // Deep merge nested object so new fields get their defaults
+          export_default_sql_options: {
+            ...DEFAULT_SETTINGS.export_default_sql_options,
+            ...((saved.export_default_sql_options as object) ?? {}),
+          },
+        } as AppSettings;
+        useAppStore.getState().setSettings(merged);
+      } catch {
+        // No settings file yet — use defaults
+      }
+
       const persisted = await loadPersistedState();
 
       if (!persisted || persisted.sessions.length === 0) {
@@ -307,6 +327,7 @@ export default function App() {
       {showConnectionDialog && <ConnectionDialog />}
       {showExportDialog && <ExportDialog />}
       {showImportDialog && <ImportDialog />}
+      {showSettingsDialog && <SettingsDialog />}
       {activeOperation && (
         <ProgressDialog type={activeOperation.type} operationId={activeOperation.operationId} />
       )}

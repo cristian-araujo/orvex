@@ -8,7 +8,9 @@ import type {
   QueryResult,
   BottomTab,
   ColumnInfo,
+  AppSettings,
 } from "../types";
+import { DEFAULT_SETTINGS } from "../types";
 
 // --- Helper to get active session ---
 
@@ -39,7 +41,9 @@ interface AppState {
   showColorEditor: boolean;
   showExportDialog: boolean;
   showImportDialog: boolean;
+  showSettingsDialog: boolean;
   activeOperation: { type: "export" | "import"; operationId: string } | null;
+  settings: AppSettings;
 
   // Sessions
   sessions: ConnectionSession[];
@@ -60,7 +64,9 @@ interface AppState {
   setShowColorEditor: (show: boolean) => void;
   setShowExportDialog: (show: boolean) => void;
   setShowImportDialog: (show: boolean) => void;
+  setShowSettingsDialog: (show: boolean) => void;
   setActiveOperation: (op: { type: "export" | "import"; operationId: string } | null) => void;
+  setSettings: (settings: AppSettings) => void;
 
   // Active session actions
   updateActiveConnectionConfig: (updates: Partial<ConnectionConfig>) => void;
@@ -86,6 +92,7 @@ interface AppState {
   setDataPage: (page: number) => void;
   setDataTotalRows: (total: number | null) => void;
   setTabAutoLimited: (id: string, autoLimited: boolean) => void;
+  setDataPageSize: (size: number) => void;
 }
 
 export type { AppState };
@@ -97,7 +104,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   showColorEditor: false,
   showExportDialog: false,
   showImportDialog: false,
+  showSettingsDialog: false,
   activeOperation: null,
+  settings: DEFAULT_SETTINGS,
 
   // Sessions
   sessions: [],
@@ -201,7 +210,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   setShowColorEditor: (show) => set({ showColorEditor: show }),
   setShowExportDialog: (show) => set({ showExportDialog: show }),
   setShowImportDialog: (show) => set({ showImportDialog: show }),
+  setShowSettingsDialog: (show) => set({ showSettingsDialog: show }),
   setActiveOperation: (op) => set({ activeOperation: op }),
+  setSettings: (settings) => set({ settings }),
 
   // --- Active session actions ---
 
@@ -342,4 +353,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => withSessionUpdate(s, (sess) => ({
       queryTabs: sess.queryTabs.map((t) => (t.id === id ? { ...t, autoLimited } : t)),
     }))),
+
+  setDataPageSize: (size) =>
+    set((s) => withSessionUpdate(s, () => ({ dataPageSize: size }))),
 }));

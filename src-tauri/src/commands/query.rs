@@ -46,8 +46,13 @@ fn cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
     try_opt_str!(sqlx::types::chrono::NaiveDateTime);
     try_opt_str!(sqlx::types::chrono::NaiveDate);
     try_opt_str!(sqlx::types::chrono::NaiveTime);
-    // TIMESTAMP columns that NaiveDateTime can't decode (timezone-aware)
-    try_opt_str!(sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>);
+    // TIMESTAMP columns that NaiveDateTime can't decode (timezone-aware).
+    // Format explicitly to avoid the " UTC" suffix that to_string() appends.
+    match row.try_get::<Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>, _>(i) {
+        Ok(Some(v)) => return serde_json::json!(v.format("%Y-%m-%d %H:%M:%S").to_string()),
+        Ok(None) => return serde_json::Value::Null,
+        Err(_) => {}
+    }
 
     // JSON columns (serialized as readable JSON string for display)
     try_opt_str!(serde_json::Value);
