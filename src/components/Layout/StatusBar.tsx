@@ -1,6 +1,12 @@
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore, getActiveSession } from "../../store/useAppStore";
 import { APP_NAME } from "../../appConfig";
+import type { QueryTab } from "../../types";
+
+// Stable fallback — avoids creating new array references on every render when
+// there is no active session, which would cause an infinite re-render loop
+// with React 19's stricter useSyncExternalStore snapshot caching.
+const EMPTY_TABS: QueryTab[] = [];
 
 export function StatusBar() {
   const {
@@ -13,7 +19,7 @@ export function StatusBar() {
       activeConnectionId: session?.connectionId ?? null,
       activeConnectionName: session?.connectionName ?? null,
       selectedDatabase: session?.selectedDatabase ?? null,
-      queryTabs: session?.queryTabs ?? [],
+      queryTabs: session?.queryTabs ?? EMPTY_TABS,
       activeTabId: session?.activeTabId ?? null,
       isLoadingData: session?.isLoadingData ?? false,
       dataResult: session?.dataResult ?? null,

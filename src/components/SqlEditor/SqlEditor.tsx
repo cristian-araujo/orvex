@@ -4,6 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore, getActiveSession } from "../../store/useAppStore";
+import type { QueryTab } from "../../types";
+
+const EMPTY_TABS: QueryTab[] = [];
 import type { editor } from "monaco-editor";
 import { KeyCode, KeyMod } from "monaco-editor";
 
@@ -24,7 +27,7 @@ export function SqlEditor() {
   const { queryTabs, activeTabId, editorTabSize } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
-      queryTabs: session?.queryTabs ?? [],
+      queryTabs: session?.queryTabs ?? EMPTY_TABS,
       activeTabId: session?.activeTabId ?? null,
       editorTabSize: s.settings.editor_tab_size,
     };

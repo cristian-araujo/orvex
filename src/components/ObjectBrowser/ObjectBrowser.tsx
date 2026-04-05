@@ -4,7 +4,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { HexColorPicker, HexColorInput } from "react-colorful";
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore, getActiveSession } from "../../store/useAppStore";
-import { UNLIMITED_PAGE_SIZE } from "../../types";
+import { UNLIMITED_PAGE_SIZE, type ColumnInfo } from "../../types";
 import { ConfirmDialog } from "../ResultsGrid/ConfirmDialog";
 import {
   ContextMenu,
@@ -12,6 +12,11 @@ import {
   IconOpenTable, IconSelectRows, IconTruncate, IconTrash, IconDatabase,
 } from "./ContextMenu";
 import { CreateDatabaseDialog } from "./CreateDatabaseDialog";
+
+const EMPTY_ARR: string[] = [];
+const EMPTY_SET = new Set<string>();
+const EMPTY_TABLES_MAP: Record<string, { name: string; table_type: string }[]> = {};
+const EMPTY_COLS_MAP: Record<string, ColumnInfo[]> = {};
 
 type ContextMenuState =
   | { type: "database"; x: number; y: number; database: string }
@@ -40,11 +45,11 @@ export function ObjectBrowser() {
       activeConnectionName: session?.connectionName ?? null,
       activeConnectionConfig: session?.connectionConfig ?? null,
       activeProfileId: session?.profileId ?? null,
-      databases: session?.databases ?? [],
-      expandedDbs: session?.expandedDbs ?? new Set<string>(),
-      tables: session?.tables ?? {},
-      expandedTables: session?.expandedTables ?? new Set<string>(),
-      columns: session?.columns ?? {},
+      databases: session?.databases ?? EMPTY_ARR,
+      expandedDbs: session?.expandedDbs ?? EMPTY_SET,
+      tables: session?.tables ?? EMPTY_TABLES_MAP,
+      expandedTables: session?.expandedTables ?? EMPTY_SET,
+      columns: session?.columns ?? EMPTY_COLS_MAP,
       selectedDatabase: session?.selectedDatabase ?? null,
       dataTableName: session?.dataTableName ?? null,
       dbFilter: session?.dbFilter ?? "",

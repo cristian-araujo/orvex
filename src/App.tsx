@@ -18,14 +18,18 @@ import { ExportDialog } from "./components/ImportExport/ExportDialog";
 import { ImportDialog } from "./components/ImportExport/ImportDialog";
 import { ProgressDialog } from "./components/ImportExport/ProgressDialog";
 import { SettingsDialog } from "./components/Settings/SettingsDialog";
-import type { ConnectionConfig, AppSettings } from "./types";
+import type { ConnectionConfig, AppSettings, QueryTab } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
+
+// Stable fallbacks — prevent new array/object references on every render when
+// there is no active session (React 19 requires getSnapshot results to be cached).
+const EMPTY_TABS: QueryTab[] = [];
 
 function QueryTabs() {
   const { queryTabs, activeTabId, activeConnectionId, selectedDatabase } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
-      queryTabs: session?.queryTabs ?? [],
+      queryTabs: session?.queryTabs ?? EMPTY_TABS,
       activeTabId: session?.activeTabId ?? null,
       activeConnectionId: session?.connectionId ?? null,
       selectedDatabase: session?.selectedDatabase ?? null,
@@ -159,7 +163,7 @@ function ActiveTabContent() {
   const { queryTabs, activeTabId } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
-      queryTabs: session?.queryTabs ?? [],
+      queryTabs: session?.queryTabs ?? EMPTY_TABS,
       activeTabId: session?.activeTabId ?? null,
     };
   }));
@@ -263,13 +267,22 @@ export default function App() {
       );
 
       // Log failed reconnections — sessions stay with connectionId="" (disconnected)
+      let anyConnected = false;
       for (let i = 0; i < results.length; i++) {
         if (results[i].status === "rejected") {
           console.error(
             `Failed to reconnect session ${restoredSessions[i].connectionName}:`,
             (results[i] as PromiseRejectedResult).reason,
           );
+        } else {
+          anyConnected = true;
         }
+      }
+
+      // If no session could reconnect, open the connection dialog so the user
+      // isn't stuck looking at an empty screen with no way to connect.
+      if (!anyConnected) {
+        useAppStore.getState().setShowConnectionDialog(true);
       }
 
       useAppStore.getState().setIsRestoring(false);

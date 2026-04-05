@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use sqlx::mysql::MySqlRow;
-use sqlx::{Column, Pool, MySql, Row, TypeInfo, ValueRef};
+use sqlx::{Column, Pool, MySql, Row, ValueRef};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::query::sanitize_ident;
@@ -584,8 +584,6 @@ async fn do_export_sql(
     let include_structure = !matches!(options.content, ExportContent::DataOnly);
     let include_data = !matches!(options.content, ExportContent::StructureOnly);
 
-    // Reusable buffer for building value tuples — avoids per-row allocation
-    let mut val_buf = String::with_capacity(4096);
     // Reusable buffer for INSERT statement assembly
     let mut insert_buf = String::with_capacity(64 * 1024);
 

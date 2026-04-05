@@ -8,9 +8,12 @@ import { useAppStore, getActiveSession } from "../../store/useAppStore";
 import { EditableDataGrid } from "./EditableDataGrid";
 import { FilterBar } from "./FilterBar";
 import type { ActiveColumnFilter } from "./FilterBar";
-import type { QueryResult } from "../../types";
+import type { QueryResult, QueryTab, ColumnInfo } from "../../types";
 
 const darkTheme = themeAlpine.withPart(colorSchemeDark);
+const EMPTY_TABS: QueryTab[] = [];
+const EMPTY_PKS: string[] = [];
+const EMPTY_COLS: ColumnInfo[] = [];
 
 function buildColDefs(result: QueryResult | null, nullDisplayText: string): ColDef[] {
   if (!result?.columns.length) return [];
@@ -142,7 +145,7 @@ export function ResultsGrid() {
   } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
-      queryTabs: session?.queryTabs ?? [],
+      queryTabs: session?.queryTabs ?? EMPTY_TABS,
       activeTabId: session?.activeTabId ?? null,
       activeBottomTab: session?.activeBottomTab ?? ("results" as const),
       dataResult: session?.dataResult ?? null,
@@ -150,7 +153,7 @@ export function ResultsGrid() {
       dataDatabase: session?.dataDatabase ?? null,
       dataTable: session?.dataTable ?? null,
       dataColumns: session?.dataColumns ?? null,
-      dataPrimaryKeys: session?.dataPrimaryKeys ?? [],
+      dataPrimaryKeys: session?.dataPrimaryKeys ?? EMPTY_PKS,
       activeConnectionId: session?.connectionId ?? null,
       activeSessionId: s.activeSessionId,
       isLoadingData: session?.isLoadingData ?? false,
