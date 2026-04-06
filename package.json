@@ -10,6 +10,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@hypothesi/tauri-plugin-mcp-bridge": "0.10.0",
     "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/api": "^2",
