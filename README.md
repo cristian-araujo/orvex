@@ -1,56 +1,67 @@
 # Orvex
 
-A fast, lightweight MySQL desktop client built with Tauri 2 and React.
+A fast, native MySQL client for developers who want a clean, distraction-free tool to connect, explore, and query their databases — without the bloat.
+
+Built with [Tauri 2](https://tauri.app) (Rust + WebView), so it's small, fast, and feels like a real desktop app.
+
+## Screenshots
+
+![Connection Manager](assets/connections.png)
+
+![SQL Editor with Object Browser](assets/gui.png)
 
 ## Features
 
-- **Connection manager** — multiple connections with SSH tunnel support
-- **Object browser** — explore databases, tables, views, and columns with context menus
-- **SQL editor** — syntax highlighting via Monaco Editor, multi-tab support
-- **Data grid** — editable rows, inline filtering, column chips, pagination
-- **Table structure** — column definitions, indexes, and foreign keys
-- **Export** — SQL, CSV, and JSON export with progress tracking and cancellation
-- **Import** — SQL file import with chunked INSERT execution and progress tracking
-- **Settings** — persistent preferences for display, query behavior, export defaults, and more
+- **Multiple sessions** — open several connections at once, each in its own tab with independent state
+- **SSH tunnel support** — connect to remote databases via SSH with password or private key auth
+- **SQL editor** — full syntax highlighting and multi-tab editing powered by Monaco Editor
+- **Object browser** — navigate databases, tables, views, and columns; click a table to preview its data instantly
+- **Data grid** — browse and filter table data with pagination, column chips, and inline search
+- **Table structure** — inspect column definitions, indexes, and foreign keys from a dedicated tab
+- **Export** — dump query results or full tables to SQL, CSV, or JSON
+- **Import** — load SQL files with chunked execution and real-time progress
+- **Persistent settings** — configure query limits, display preferences, export behavior, and more
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| Framework | [Tauri 2](https://tauri.app) (Rust + WebView) |
-| Frontend | React 19 + TypeScript |
-| State | Zustand |
-| Editor | Monaco Editor |
-| Data grid | AG Grid Community |
-| Database | sqlx 0.7 (MySQL) |
-| SSH tunnels | russh |
+| Framework | [Tauri 2](https://tauri.app) |
+| Frontend | [React 19](https://react.dev) + TypeScript |
+| State | [Zustand](https://zustand-demo.pmnd.rs) |
+| Editor | [Monaco Editor](https://microsoft.github.io/monaco-editor/) |
+| Data grid | [AG Grid Community](https://www.ag-grid.com) |
+| Database driver | [sqlx](https://github.com/launchbadge/sqlx) (MySQL) |
+| SSH tunnels | [russh](https://github.com/warp-tech/russh) |
 
-## Prerequisites
+## Building from Source
 
-- [Rust](https://rustup.rs/) (stable)
+### Prerequisites
+
+- [Rust](https://rustup.rs/) (stable toolchain)
 - [Node.js](https://nodejs.org/) 18+
-- A C compiler and system WebView (see [Tauri prerequisites](https://tauri.app/start/prerequisites/))
+- Platform-specific WebView — see [Tauri prerequisites](https://tauri.app/start/prerequisites/)
 
-## Getting Started
+### Run
 
 ```bash
 # Install frontend dependencies
 npm install
 
-# Run in development mode (hot reload)
+# Start in development mode (hot reload)
 npm run tauri dev
 
-# Build for production
+# Build a production bundle
 npm run tauri build
 ```
 
 ## Platform Support
 
-Orvex targets all major desktop platforms via Tauri's bundle system:
-
-- Linux (AppImage, .deb)
-- macOS (.dmg, .app)
-- Windows (.msi, .exe)
+| Platform | Bundle format |
+|---|---|
+| macOS | `.dmg`, `.app` |
+| Linux | `.AppImage`, `.deb` |
+| Windows | `.msi`, `.exe` |
 
 ## License
 
