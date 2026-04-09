@@ -75,6 +75,7 @@ interface AppState {
   updateActiveConnectionConfig: (updates: Partial<ConnectionConfig>) => void;
   setSelectedDatabase: (db: string | null) => void;
   setDatabases: (dbs: string[]) => void;
+  setDatabasesForSession: (sessionId: string, dbs: string[]) => void;
   toggleDb: (db: string) => void;
   setTables: (db: string, tables: { name: string; table_type: string }[]) => void;
   setExpandedTables: (expandedTables: Set<string>) => void;
@@ -250,6 +251,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setDatabases: (dbs) =>
     set((s) => withSessionUpdate(s, () => ({ databases: dbs }))),
+
+  setDatabasesForSession: (sessionId, dbs) =>
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === sessionId ? { ...sess, databases: dbs } : sess
+      ),
+    })),
 
   toggleDb: (db) =>
     set((s) => withSessionUpdate(s, (sess) => {

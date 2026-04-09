@@ -25,6 +25,7 @@ type ContextMenuState =
 
 export function ObjectBrowser() {
   const {
+    activeSessionId,
     activeConnectionId,
     activeConnectionName,
     activeConnectionConfig,
@@ -41,6 +42,7 @@ export function ObjectBrowser() {
   } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
+      activeSessionId: s.activeSessionId,
       activeConnectionId: session?.connectionId ?? null,
       activeConnectionName: session?.connectionName ?? null,
       activeConnectionConfig: session?.connectionConfig ?? null,
@@ -58,12 +60,13 @@ export function ObjectBrowser() {
   }));
   const showColorEditor = useAppStore(s => s.showColorEditor);
   const {
-    setDatabases, toggleDb, setTables, setExpandedTables, setColumns,
+    setDatabases, setDatabasesForSession, toggleDb, setTables, setExpandedTables, setColumns,
     setSelectedDatabase, setShowColorEditor, setShowExportDialog, setShowImportDialog, addQueryTab, addTableTab,
     updateActiveConnectionConfig, setDataResult, setDbFilter, setTableFilter,
     setLoadingData, setDataPage, setDataTotalRows, setDataPageSize,
   } = useAppStore(useShallow(s => ({
     setDatabases: s.setDatabases,
+    setDatabasesForSession: s.setDatabasesForSession,
     toggleDb: s.toggleDb,
     setTables: s.setTables,
     setExpandedTables: s.setExpandedTables,
@@ -120,10 +123,14 @@ export function ObjectBrowser() {
   const setFilterValue = isConnectionLevel ? setDbFilter : setTableFilter;
 
   useEffect(() => {
-    if (!activeConnectionId) return;
-    invoke<string[]>("get_databases", { connectionId: activeConnectionId })
-      .then(setDatabases)
-      .catch(console.error);
+    if (!activeConnectionId || !activeSessionId) return;
+    const sessionId = activeSessionId;
+    const connId = activeConnectionId;
+    startLoading("refresh:databases");
+    invoke<string[]>("get_databases", { connectionId: connId })
+      .then((dbs) => setDatabasesForSession(sessionId, dbs))
+      .catch(console.error)
+      .finally(() => stopLoading("refresh:databases"));
   }, [activeConnectionId]);
 
   // Auto-fetch tables/columns for restored expanded nodes
@@ -219,9 +226,11 @@ export function ObjectBrowser() {
   const handleRefresh = () => {
     if (isConnectionLevel) {
       const key = "refresh:databases";
+      const capturedSessionId = activeSessionId;
+      const capturedConnId = activeConnectionId;
       startLoading(key);
-      invoke<string[]>("get_databases", { connectionId: activeConnectionId })
-        .then(setDatabases)
+      invoke<string[]>("get_databases", { connectionId: capturedConnId })
+        .then((dbs) => setDatabasesForSession(capturedSessionId!, dbs))
         .catch(console.error)
         .finally(() => stopLoading(key));
     } else if (selectedDatabase) {
@@ -572,7 +581,12 @@ export function ObjectBrowser() {
         style={{ flex: 1, overflowY: "auto", padding: "4px 0" }}
         onContextMenu={(e) => { e.preventDefault(); setContextMenu({ type: "connection", x: e.clientX, y: e.clientY }); }}
       >
-        {databases
+        {isRefreshing && databases.length === 0 ? (
+          <div style={{ padding: "8px 14px", fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
+            <span className="spinner spinner-sm" />
+            Loading databases...
+          </div>
+        ) : databases
           .filter((db) => !dbFilter || db.toLowerCase().includes(dbFilter.toLowerCase()))
           .map((db) => (
           <div key={db}>
@@ -896,8 +910,10 @@ export function ObjectBrowser() {
           connectionId={activeConnectionId}
           onCreated={(dbName) => {
             setShowCreateDbDialog(false);
-            invoke<string[]>("get_databases", { connectionId: activeConnectionId })
-              .then((dbs) => { setDatabases(dbs); setSelectedDatabase(dbName); })
+            const capturedSessionId = activeSessionId;
+            const capturedConnId = activeConnectionId;
+            invoke<string[]>("get_databases", { connectionId: capturedConnId })
+              .then((dbs) => { setDatabasesForSession(capturedSessionId!, dbs); setSelectedDatabase(dbName); })
               .catch(console.error);
           }}
           onClose={() => setShowCreateDbDialog(false)}
