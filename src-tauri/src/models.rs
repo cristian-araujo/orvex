@@ -174,6 +174,11 @@ pub struct ImportOptions {
     pub file_path: String,
     pub database: String,
     pub stop_on_error: bool,
+    /// When true, sets SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO' before executing
+    /// any statements. This disables strict modes (NO_ZERO_DATE, NO_ZERO_IN_DATE,
+    /// STRICT_TRANS_TABLES) that reject DEFAULT '0000-00-00 00:00:00' — common in
+    /// legacy dumps generated on MySQL 5.6 or servers without strict mode.
+    pub disable_strict_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

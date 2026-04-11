@@ -190,6 +190,8 @@ export interface ImportOptions {
   file_path: string;
   database: string;
   stop_on_error: boolean;
+  /** Disables strict SQL modes (NO_ZERO_DATE, etc.) for legacy dump compatibility. */
+  disable_strict_mode: boolean;
 }
 
 export interface ExportProgressPayload {
