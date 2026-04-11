@@ -8,8 +8,18 @@ use tauri::{AppHandle, Emitter, State};
 use crate::db::manager::ConnectionManager;
 use crate::models::{ImportOptions, ImportProgressPayload};
 
-// Global registry for cancel flags (separate from export)
-static IMPORT_CANCEL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+// Cancel context per operation. Holds the cancel flag AND the MySQL thread ID
+// so that cancel_import can issue KILL QUERY to interrupt any in-flight statement
+// immediately, without waiting for it to complete on its own.
+struct CancelContext {
+    flag: Arc<AtomicBool>,
+    pool: sqlx::Pool<sqlx::MySql>,
+    // Set by do_import after the connection is acquired; None until then.
+    mysql_conn_id: Arc<Mutex<Option<u64>>>,
+}
+
+// Global registry for cancel contexts (separate from export)
+static IMPORT_CANCEL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, CancelContext>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // Latest progress payload per operation — used by the frontend to recover from the race condition
@@ -17,13 +27,15 @@ static IMPORT_CANCEL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Arc<Ato
 static IMPORT_PROGRESS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, ImportProgressPayload>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn register_cancel(id: &str) -> Arc<AtomicBool> {
+fn register_cancel(id: &str, pool: sqlx::Pool<sqlx::MySql>) -> (Arc<AtomicBool>, Arc<Mutex<Option<u64>>>) {
     let flag = Arc::new(AtomicBool::new(false));
-    IMPORT_CANCEL_REGISTRY
-        .lock()
-        .unwrap()
-        .insert(id.to_string(), flag.clone());
-    flag
+    let mysql_conn_id = Arc::new(Mutex::new(None::<u64>));
+    IMPORT_CANCEL_REGISTRY.lock().unwrap().insert(id.to_string(), CancelContext {
+        flag: flag.clone(),
+        pool,
+        mysql_conn_id: mysql_conn_id.clone(),
+    });
+    (flag, mysql_conn_id)
 }
 
 fn unregister_cancel(id: &str) {
@@ -295,6 +307,8 @@ impl SqlParser {
 // is never corrupted.
 
 const INSERT_CHUNK_ROWS: usize = 5000;
+const INSERT_CHUNK_BYTES: usize = 1_048_576;        // 1 MiB hard cap per statement
+const TRANSACTION_BATCH_STATEMENTS: u64 = 500;      // COMMIT every N statements
 
 fn split_insert_chunks(stmt: &str) -> Vec<String> {
     // Quick checks: must start with INSERT and be large enough to bother
@@ -445,13 +459,22 @@ fn split_insert_chunks(stmt: &str) -> Vec<String> {
         j += 1;
     }
 
-    // Not worth chunking
-    if rows.len() <= INSERT_CHUNK_ROWS {
+    // Chunking dual: by row count (wide tables, many small rows) or by byte size
+    // (tables with LONGTEXT/BLOB, few large rows). Both conditions must be false
+    // to skip chunking — a statement that fits in rows but exceeds the byte cap
+    // still needs to be split.
+    if rows.len() <= INSERT_CHUNK_ROWS && stmt.len() <= INSERT_CHUNK_BYTES {
         return vec![stmt.to_string()];
     }
+    let rows_per_chunk: usize = if stmt.len() > INSERT_CHUNK_BYTES {
+        // Size-based: how many rows fit in INSERT_CHUNK_BYTES (linear proportion)
+        (rows.len() * INSERT_CHUNK_BYTES / stmt.len()).max(1)
+    } else {
+        INSERT_CHUNK_ROWS
+    };
 
     // Reconstruct as multiple INSERT statements
-    rows.chunks(INSERT_CHUNK_ROWS)
+    rows.chunks(rows_per_chunk)
         .map(|chunk| format!("{} {}", header, chunk.join(",")))
         .collect()
 }
@@ -464,6 +487,7 @@ async fn do_import(
     app: AppHandle,
     operation_id: String,
     cancel: Arc<AtomicBool>,
+    mysql_conn_id: Arc<Mutex<Option<u64>>>,
 ) {
     let start = std::time::Instant::now();
 
@@ -529,6 +553,45 @@ async fn do_import(
         }
     };
 
+    // Store the MySQL thread ID so cancel_import can issue KILL QUERY to interrupt
+    // any in-flight statement without waiting for it to complete naturally.
+    match sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
+        .fetch_one(&mut *conn)
+        .await
+    {
+        Ok(tid) => {
+            if let Ok(mut guard) = mysql_conn_id.lock() {
+                *guard = Some(tid);
+            }
+        }
+        Err(_) => {} // Non-fatal: cancel falls back to flag-only mode
+    }
+
+    // Disable strict SQL mode for this import session when requested.
+    // Dumps generated on MySQL 5.6 or servers without strict mode commonly contain
+    // DEFAULT '0000-00-00 00:00:00' in CREATE TABLE statements, which MySQL 5.7.5+
+    // rejects with error 1067 when NO_ZERO_DATE / NO_ZERO_IN_DATE are active.
+    // Setting 'NO_AUTO_VALUE_ON_ZERO' matches what mysqldump itself writes at the
+    // top of its output and strips all strict modes while keeping the one safe guard.
+    if options.disable_strict_mode {
+        let set_mode = "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'";
+        if let Err(e) = sqlx::raw_sql(set_mode).execute(&mut *conn).await {
+            emit_progress(&app, &ImportProgressPayload {
+                operation_id: operation_id.clone(),
+                phase: "error".to_string(),
+                bytes_read: 0,
+                bytes_total,
+                statements_executed: 0,
+                errors_count: 0,
+                current_statement_preview: set_mode.to_string(),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Cannot set sql_mode: {}", e)),
+            });
+            unregister_cancel(&operation_id);
+            return;
+        }
+    }
+
     // USE database if specified.
     // Must use raw_sql (simple query protocol) — USE is not supported in the prepared
     // statement protocol and would fail with error 1295 (HY000).
@@ -551,6 +614,26 @@ async fn do_import(
         }
     }
 
+    // Disable autocommit for the import session. DDL statements (CREATE TABLE,
+    // ALTER TABLE) issue an implicit COMMIT — that is correct MySQL behavior.
+    // Explicit COMMITs are issued every TRANSACTION_BATCH_STATEMENTS to bound
+    // InnoDB's undo log. On cancel or stop_on_error, we issue ROLLBACK.
+    if let Err(e) = sqlx::raw_sql("SET autocommit = 0").execute(&mut *conn).await {
+        emit_progress(&app, &ImportProgressPayload {
+            operation_id: operation_id.clone(),
+            phase: "error".to_string(),
+            bytes_read: 0,
+            bytes_total,
+            statements_executed: 0,
+            errors_count: 0,
+            current_statement_preview: "SET autocommit = 0".to_string(),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+            error: Some(format!("Cannot set autocommit: {}", e)),
+        });
+        unregister_cancel(&operation_id);
+        return;
+    }
+
     let mut parser = SqlParser::new();
     let mut bytes_read: u64 = 0;
     let mut statements_executed: u64 = 0;
@@ -559,6 +642,7 @@ async fn do_import(
 
     for line_result in reader.lines() {
         if cancel.load(Ordering::Relaxed) {
+            let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
             emit_progress(&app, &ImportProgressPayload {
                 operation_id: operation_id.clone(),
                 phase: "cancelled".to_string(),
@@ -593,6 +677,7 @@ async fn do_import(
 
                     for chunk in &chunks {
                         if cancel.load(Ordering::Relaxed) {
+                            let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
                             emit_progress(&app, &ImportProgressPayload {
                                 operation_id: operation_id.clone(),
                                 phase: "cancelled".to_string(),
@@ -642,10 +727,33 @@ async fn do_import(
                         match sqlx::raw_sql(chunk_trimmed).execute(&mut *conn).await {
                             Ok(_) => {
                                 statements_executed += 1;
+                                if statements_executed % TRANSACTION_BATCH_STATEMENTS == 0 {
+                                    let _ = sqlx::raw_sql("COMMIT").execute(&mut *conn).await;
+                                }
                             }
                             Err(e) => {
+                                // KILL QUERY from cancel_import may have interrupted this
+                                // statement. Check the cancel flag before treating it as a
+                                // regular error — emit "cancelled" instead of "error".
+                                if cancel.load(Ordering::Relaxed) {
+                                    let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+                                    emit_progress(&app, &ImportProgressPayload {
+                                        operation_id: operation_id.clone(),
+                                        phase: "cancelled".to_string(),
+                                        bytes_read,
+                                        bytes_total,
+                                        statements_executed,
+                                        errors_count,
+                                        current_statement_preview: String::new(),
+                                        elapsed_ms: start.elapsed().as_millis() as u64,
+                                        error: None,
+                                    });
+                                    unregister_cancel(&operation_id);
+                                    return;
+                                }
                                 errors_count += 1;
                                 if options.stop_on_error {
+                                    let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
                                     emit_progress(&app, &ImportProgressPayload {
                                         operation_id: operation_id.clone(),
                                         phase: "error".to_string(),
@@ -716,6 +824,7 @@ async fn do_import(
                 Err(e) => {
                     errors_count += 1;
                     if options.stop_on_error {
+                        let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
                         emit_progress(&app, &ImportProgressPayload {
                             operation_id: operation_id.clone(),
                             phase: "error".to_string(),
@@ -735,6 +844,7 @@ async fn do_import(
         }
     }
 
+    let _ = sqlx::raw_sql("COMMIT").execute(&mut *conn).await;
     emit_progress(&app, &ImportProgressPayload {
         operation_id: operation_id.clone(),
         phase: "complete".to_string(),
@@ -761,7 +871,7 @@ pub async fn start_import(
 ) -> Result<String, String> {
     let pool = state.get_pool(&connection_id)?;
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let cancel = register_cancel(&operation_id);
+    let (cancel, mysql_conn_id) = register_cancel(&operation_id, pool.clone());
     let op_id = operation_id.clone();
 
     // do_import mixes sync file I/O with async MySQL I/O, and internally uses
@@ -774,7 +884,7 @@ pub async fn start_import(
     // avoiding the `Send` requirement entirely.
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        handle.block_on(do_import(pool, options, app, op_id, cancel));
+        handle.block_on(do_import(pool, options, app, op_id, cancel, mysql_conn_id));
     });
 
     Ok(operation_id)
@@ -790,10 +900,39 @@ pub fn get_import_progress(operation_id: String) -> Option<ImportProgressPayload
 
 #[tauri::command]
 pub async fn cancel_import(operation_id: String) -> Result<(), String> {
-    if let Ok(registry) = IMPORT_CANCEL_REGISTRY.lock() {
-        if let Some(flag) = registry.get(&operation_id) {
-            flag.store(true, Ordering::Relaxed);
+    // Set the cancel flag and, if the import is currently executing a statement,
+    // issue KILL QUERY on a separate connection to interrupt it immediately.
+    // Without KILL QUERY, the cancel flag is only checked between statements —
+    // a long-running INSERT could block cancellation for seconds or minutes.
+    let kill_task = {
+        if let Ok(registry) = IMPORT_CANCEL_REGISTRY.lock() {
+            if let Some(ctx) = registry.get(&operation_id) {
+                ctx.flag.store(true, Ordering::Relaxed);
+                let thread_id = ctx.mysql_conn_id.lock().ok().and_then(|g| *g);
+                thread_id.map(|tid| (ctx.pool.clone(), tid))
+            } else {
+                None
+            }
+        } else {
+            None
         }
+    };
+
+    if let Some((pool, tid)) = kill_task {
+        // Fire-and-forget: acquire a second connection and kill the active query.
+        // Uses spawn_blocking + block_on (same pattern as do_import) to avoid the
+        // HRTB on Executor<'_> that prevents tokio::spawn from working with raw_sql.
+        // If the import finishes before KILL reaches MySQL, it's a harmless no-op.
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            handle.block_on(async move {
+                let kill_sql = format!("KILL QUERY {}", tid);
+                if let Ok(mut conn) = pool.acquire().await {
+                    let _ = sqlx::raw_sql(&kill_sql).execute(&mut *conn).await;
+                }
+            });
+        });
     }
+
     Ok(())
 }

@@ -133,16 +133,26 @@ pub async fn execute_query(
     database: Option<String>,
 ) -> Result<QueryResult, String> {
     let pool = state.get_pool(&connection_id)?;
-    let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
-
-    if let Some(ref db) = database {
-        sqlx::query(&format!("USE `{}`", sanitize_ident(db)))
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
-    run_query_on_conn(&mut *conn, &sql).await
+    // raw_sql() (text protocol) is required for USE because MySQL rejects USE in the
+    // prepared-statement protocol with error 1295. However, raw_sql() + &mut conn
+    // triggers an HRTB issue in sqlx 0.7 when the caller is wrapped by
+    // tauri::generate_handler!. The spawn_blocking + block_on pattern avoids this —
+    // same workaround used in do_import / cancel_import.
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        handle.block_on(async move {
+            let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
+            if let Some(ref db) = database {
+                sqlx::raw_sql(&format!("USE `{}`", sanitize_ident(db)))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            run_query_on_conn(&mut *conn, &sql).await
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

@@ -78,12 +78,54 @@ impl ConnectionManager {
             }
         }
 
+        // Capture the session settings that must apply to every connection in the pool.
+        // after_connect runs on each new physical connection, so session-level SET
+        // statements reach every connection — including the dedicated one acquired by
+        // do_import — rather than just one arbitrary connection in the pool.
+        let use_global = config.use_global_sql_mode.unwrap_or(true);
+        let sql_mode = config.sql_mode.clone();
+        let read_only = config.read_only.unwrap_or(false);
+        let session_timeout = config.session_timeout;
+        let init_commands = config.init_commands.clone();
+
         let pool = match MySqlPoolOptions::new()
             .min_connections(2)
             .max_connections(5)
             .acquire_timeout(Duration::from_secs(10))
             .idle_timeout(Duration::from_secs(300))
             .max_lifetime(Duration::from_secs(1800))
+            .after_connect(move |conn, _meta| {
+                let sql_mode = sql_mode.clone();
+                let init_commands = init_commands.clone();
+                Box::pin(async move {
+                    if let Some(timeout) = session_timeout {
+                        let sql = format!("SET SESSION wait_timeout = {}", timeout);
+                        let _ = sqlx::query(&sql).execute(&mut *conn).await;
+                    }
+                    if read_only {
+                        let _ = sqlx::query("SET SESSION TRANSACTION READ ONLY")
+                            .execute(&mut *conn)
+                            .await;
+                    }
+                    if !use_global {
+                        if let Some(ref mode) = sql_mode {
+                            if !mode.is_empty() {
+                                let sql = format!("SET SESSION sql_mode = '{}'", mode);
+                                let _ = sqlx::query(&sql).execute(&mut *conn).await;
+                            }
+                        }
+                    }
+                    if let Some(ref cmds) = init_commands {
+                        for cmd in cmds.split(';') {
+                            let cmd = cmd.trim();
+                            if !cmd.is_empty() {
+                                let _ = sqlx::query(cmd).execute(&mut *conn).await;
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+            })
             .connect_with(opts)
             .await
         {
@@ -97,47 +139,10 @@ impl ConnectionManager {
             }
         };
 
-        // Apply post-connection settings
-        self.apply_session_settings(&pool, config).await;
-
         let managed = ManagedConnection { pool, ssh_tunnel };
         let mut conns = self.connections.lock().map_err(|e| e.to_string())?;
         conns.insert(id.to_string(), managed);
         Ok(())
-    }
-
-    /// Apply session-level settings after pool creation
-    async fn apply_session_settings(&self, pool: &Pool<MySql>, config: &ConnectionConfig) {
-        // Session idle timeout
-        if let Some(timeout) = config.session_timeout {
-            let sql = format!("SET SESSION wait_timeout = {}", timeout);
-            let _ = sqlx::query(&sql).execute(pool).await;
-        }
-
-        // Read-only mode
-        if config.read_only.unwrap_or(false) {
-            let _ = sqlx::query("SET SESSION TRANSACTION READ ONLY").execute(pool).await;
-        }
-
-        // SQL Mode (only if not using global value)
-        if !config.use_global_sql_mode.unwrap_or(true) {
-            if let Some(ref mode) = config.sql_mode {
-                if !mode.is_empty() {
-                    let sql = format!("SET SESSION sql_mode = '{}'", mode);
-                    let _ = sqlx::query(&sql).execute(pool).await;
-                }
-            }
-        }
-
-        // Init commands
-        if let Some(ref cmds) = config.init_commands {
-            for cmd in cmds.split(';') {
-                let cmd = cmd.trim();
-                if !cmd.is_empty() {
-                    let _ = sqlx::query(cmd).execute(pool).await;
-                }
-            }
-        }
     }
 
     pub fn disconnect(&self, id: &str) -> Result<(), String> {

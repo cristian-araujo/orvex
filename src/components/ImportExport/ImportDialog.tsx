@@ -27,6 +27,7 @@ export function ImportDialog() {
   const [filePath, setFilePath] = useState("");
   const [database, setDatabase] = useState(selectedDatabase ?? "");
   const [stopOnError, setStopOnError] = useState(true);
+  const [disableStrictMode, setDisableStrictMode] = useState(true);
   const [starting, setStarting] = useState(false);
   const [hovering, setHovering] = useState(false);
 
@@ -47,6 +48,7 @@ export function ImportDialog() {
         file_path: filePath,
         database,
         stop_on_error: stopOnError,
+        disable_strict_mode: disableStrictMode,
       };
       const operationId = await invoke<string>("start_import", { connectionId, options });
       setShowImportDialog(false);
@@ -285,6 +287,52 @@ export function ImportDialog() {
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+
+            {/* Compatibility mode */}
+            <div
+              onClick={() => setDisableStrictMode((v) => !v)}
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 10,
+                padding: "10px 12px",
+                border: `1px solid ${disableStrictMode ? "var(--accent)" : "var(--border)"}`,
+                borderLeft: `3px solid ${disableStrictMode ? "var(--accent)" : "transparent"}`,
+                background: disableStrictMode ? "rgba(0,120,212,0.06)" : "var(--bg-surface)",
+                borderRadius: 3,
+                cursor: "pointer",
+                userSelect: "none",
+                transition: "all 0.1s",
+              }}
+            >
+              <div style={{
+                width: 14,
+                height: 14,
+                marginTop: 1,
+                flexShrink: 0,
+                border: `1.5px solid ${disableStrictMode ? "var(--accent)" : "var(--border)"}`,
+                borderRadius: 3,
+                background: disableStrictMode ? "var(--accent)" : "transparent",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transition: "all 0.1s",
+              }}>
+                {disableStrictMode && (
+                  <svg width="8" height="6" viewBox="0 0 8 6" fill="none">
+                    <path d="M1 3l2 2 4-4" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </div>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: disableStrictMode ? "var(--text-bright)" : "var(--text)" }}>
+                  Compatibility mode
+                </div>
+                <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
+                  Disables strict SQL modes — required for WordPress, legacy mysqldumps
+                </div>
               </div>
             </div>
           </div>
