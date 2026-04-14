@@ -81,14 +81,11 @@ interface EditableDataGridProps {
   onGridReady?: (api: GridApi) => void;
 }
 
-function isColumnEditable(col: ColumnInfo, isInsertedRow: boolean): boolean {
+function isColumnEditable(col: ColumnInfo): boolean {
   if (col.column_type.toLowerCase().includes("blob") || col.column_type.toLowerCase().includes("binary")) {
     return false;
   }
   if (col.extra.toLowerCase().includes("generated")) {
-    return false;
-  }
-  if (!isInsertedRow && col.extra.toLowerCase().includes("auto_increment")) {
     return false;
   }
   return true;
@@ -235,10 +232,9 @@ export function EditableDataGrid({
         editable: usesModal ? false : (params: { node: { data: Record<string, unknown> } }) => {
           if (!colInfo) return true;
           const rowIdx = params.node.data.__rowIndex as number;
-          const isInserted = rowIdx >= originalRowCount;
           const isDeleted = deletedIndices.has(rowIdx);
           if (isDeleted) return false;
-          return isColumnEditable(colInfo, isInserted);
+          return isColumnEditable(colInfo);
         },
         cellStyle: (params: CellClassParams) => {
           const rowIdx = params.data?.__rowIndex as number;
@@ -282,7 +278,7 @@ export function EditableDataGrid({
 
     const rowIdx = event.data.__rowIndex as number;
     if (deletedIndices.has(rowIdx)) return;
-    if (!isColumnEditable(colInfo, rowIdx >= originalRowCount)) return;
+    if (!isColumnEditable(colInfo)) return;
 
     const currentValue = event.data[col];
 
@@ -397,8 +393,8 @@ export function EditableDataGrid({
     if (!colInfo || !colInfo.nullable) return;
     const rowIdx = event.data.__rowIndex as number;
     if (deletedIndices.has(rowIdx)) return;
+    if (!isColumnEditable(colInfo)) return;
     const isInserted = rowIdx >= originalRowCount;
-    if (!isColumnEditable(colInfo, isInserted)) return;
 
     const mouseEvent = event.event as MouseEvent;
     const x = Math.min(mouseEvent.clientX, window.innerWidth - 170);

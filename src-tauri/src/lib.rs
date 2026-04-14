@@ -52,6 +52,8 @@ pub fn run() {
             truncate_table,
             drop_database,
             drop_all_tables,
+            get_table_auto_increment,
+            set_table_auto_increment,
             // Session
             save_session_state,
             load_session_state,
