@@ -59,6 +59,8 @@ export function ObjectBrowser() {
     };
   }));
   const showColorEditor = useAppStore(s => s.showColorEditor);
+  const reconnectSession = useAppStore(s => s.reconnectSession);
+  const reconnectingSessionId = useAppStore(s => s.reconnectingSessionId);
   const {
     setDatabases, setDatabasesForSession, toggleDb, setTables, setExpandedTables, setColumns,
     setSelectedDatabase, setShowColorEditor, setShowExportDialog, setShowImportDialog, addQueryTab, addTableTab,
@@ -95,6 +97,7 @@ export function ObjectBrowser() {
   const previewRequestId = useRef(0);
   const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
   const [errorNodes, setErrorNodes] = useState<Set<string>>(new Set());
+  const [dbLoadError, setDbLoadError] = useState<string | null>(null);
   const startLoading = useCallback((key: string) => {
     setErrorNodes(prev => { const next = new Set(prev); next.delete(key); return next; });
     setLoadingNodes(prev => new Set(prev).add(key));
@@ -126,10 +129,14 @@ export function ObjectBrowser() {
     if (!activeConnectionId || !activeSessionId) return;
     const sessionId = activeSessionId;
     const connId = activeConnectionId;
+    setDbLoadError(null);
     startLoading("refresh:databases");
     invoke<string[]>("get_databases", { connectionId: connId })
       .then((dbs) => setDatabasesForSession(sessionId, dbs))
-      .catch(console.error)
+      .catch((e) => {
+        console.error(e);
+        setDbLoadError(String(e));
+      })
       .finally(() => stopLoading("refresh:databases"));
   }, [activeConnectionId]);
 
@@ -228,10 +235,14 @@ export function ObjectBrowser() {
       const key = "refresh:databases";
       const capturedSessionId = activeSessionId;
       const capturedConnId = activeConnectionId;
+      setDbLoadError(null);
       startLoading(key);
       invoke<string[]>("get_databases", { connectionId: capturedConnId })
         .then((dbs) => setDatabasesForSession(capturedSessionId!, dbs))
-        .catch(console.error)
+        .catch((e) => {
+          console.error(e);
+          setDbLoadError(String(e));
+        })
         .finally(() => stopLoading(key));
     } else if (selectedDatabase) {
       const nodeKey = `db:${selectedDatabase}`;
@@ -584,7 +595,19 @@ export function ObjectBrowser() {
         {isRefreshing && databases.length === 0 ? (
           <div style={{ padding: "8px 14px", fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
             <span className="spinner spinner-sm" />
-            Loading databases...
+            {reconnectingSessionId === activeSessionId ? "Reconnecting..." : "Loading databases..."}
+          </div>
+        ) : dbLoadError && databases.length === 0 ? (
+          <div style={{ padding: "12px 14px", fontSize: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+            <span style={{ color: "var(--danger)" }}>Connection lost.</span>
+            <button
+              className="btn-primary"
+              style={{ fontSize: 11, padding: "4px 10px", alignSelf: "flex-start" }}
+              disabled={reconnectingSessionId === activeSessionId}
+              onClick={() => reconnectSession(activeSessionId!)}
+            >
+              {reconnectingSessionId === activeSessionId ? "Reconnecting..." : "Reconnect"}
+            </button>
           </div>
         ) : databases
           .filter((db) => !dbFilter || db.toLowerCase().includes(dbFilter.toLowerCase()))

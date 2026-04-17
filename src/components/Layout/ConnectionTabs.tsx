@@ -79,7 +79,7 @@ export function ConnectionTabs() {
               onMouseLeave={(e) => {
                 if (!isActive) (e.currentTarget as HTMLDivElement).style.background = "transparent";
               }}
-              title={!isConnected ? "Disconnected — double-click or right-click to reconnect" : session.connectionName}
+              title={!isConnected ? "Disconnected — double-click or right-click to reconnect" : `${session.connectionName} — right-click to reconnect`}
             >
               <span style={{ color: isSessionReconnecting ? "var(--warning)" : isConnected ? "var(--success)" : "var(--danger)", fontSize: 8 }}>
                 {isSessionReconnecting ? "◌" : "⬤"}
@@ -142,16 +142,14 @@ export function ConnectionTabs() {
             const ctxConnected = !!ctxSession?.connectionId;
             return (
               <>
-                {!ctxConnected && (
-                  <div
-                    onClick={() => { reconnectSession(contextMenu.sessionId); setContextMenu(null); }}
-                    style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap", color: "var(--success)" }}
-                    onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
-                    onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
-                  >
-                    Reconnect
-                  </div>
-                )}
+                <div
+                  onClick={() => { reconnectSession(contextMenu.sessionId); setContextMenu(null); }}
+                  style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap", color: "var(--success)" }}
+                  onMouseEnter={(e) => ((e.currentTarget as HTMLDivElement).style.background = "var(--bg-hover)")}
+                  onMouseLeave={(e) => ((e.currentTarget as HTMLDivElement).style.background = "transparent")}
+                >
+                  Reconnect
+                </div>
                 <div
                   onClick={() => { setShowColorEditor(true); setContextMenu(null); }}
                   style={{ padding: "7px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
