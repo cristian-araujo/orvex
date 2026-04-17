@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AutoIncrementDialog } from "./AutoIncrementDialog";
 import { AgGridReact } from "ag-grid-react";
 import type { ColDef } from "ag-grid-community";
 import { themeAlpine, colorSchemeDark } from "ag-grid-community";
@@ -62,6 +63,7 @@ export function TableStructure({ database, table }: Props) {
   const [page, setPage] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showAutoIncrementDialog, setShowAutoIncrementDialog] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -70,6 +72,7 @@ export function TableStructure({ database, table }: Props) {
     setDataResult(null);
     setPage(0);
     setError(null);
+    setShowAutoIncrementDialog(false);
 
     if (!activeConnectionId) return;
 
@@ -177,6 +180,18 @@ export function TableStructure({ database, table }: Props) {
             {t.label}
           </button>
         ))}
+
+        {activeTab === "columns" && structure?.columns.some(c => c.extra.toLowerCase().includes("auto_increment")) && (
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", padding: "0 12px" }}>
+            <button
+              className="btn-secondary"
+              style={{ padding: "2px 10px", fontSize: 11 }}
+              onClick={() => setShowAutoIncrementDialog(true)}
+            >
+              Auto-Increment…
+            </button>
+          </div>
+        )}
 
         {activeTab === "data" && (
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, padding: "0 12px" }}>
@@ -360,6 +375,15 @@ export function TableStructure({ database, table }: Props) {
           />
         )}
       </div>
+
+      {showAutoIncrementDialog && activeConnectionId && (
+        <AutoIncrementDialog
+          connectionId={activeConnectionId}
+          database={database}
+          table={table}
+          onClose={() => setShowAutoIncrementDialog(false)}
+        />
+      )}
     </div>
   );
 }

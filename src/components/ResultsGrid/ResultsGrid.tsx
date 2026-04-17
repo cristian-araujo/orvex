@@ -379,9 +379,16 @@ export function ResultsGrid() {
     { key: "messages" as const, label: "Messages" },
   ];
 
+  // When the table is empty, the backend returns columns:[] — synthesize columns from dataColumns metadata
+  const displayResult = useMemo(() => {
+    if (!dataResult || dataResult.columns.length > 0) return dataResult;
+    if (!dataColumns || dataColumns.length === 0) return dataResult;
+    return { ...dataResult, columns: dataColumns.map((c) => c.field) };
+  }, [dataResult, dataColumns]);
+
   // Should FilterBar be visible?
   const showFilterBar =
-    (activeBottomTab === "data" && dataResult && dataResult.columns.length > 0) ||
+    (activeBottomTab === "data" && displayResult && displayResult.columns.length > 0) ||
     (activeBottomTab === "results" && !activeTab?.isExecuting && queryResult && queryResult.columns.length > 0);
 
   return (
@@ -508,10 +515,10 @@ export function ResultsGrid() {
 
         {activeBottomTab === "data" && (
           <>
-            {dataResult && dataResult.columns.length > 0 && dataDatabase && dataTable && dataColumns && activeConnectionId ? (
+            {displayResult && displayResult.columns.length > 0 && dataDatabase && dataTable && dataColumns && activeConnectionId ? (
               <EditableDataGrid
                 key={`${activeSessionId}-${dataDatabase}-${dataTable}`}
-                result={dataResult}
+                result={displayResult}
                 database={dataDatabase}
                 table={dataTable}
                 columns={dataColumns}

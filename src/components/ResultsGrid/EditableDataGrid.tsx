@@ -1,8 +1,9 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, CellValueChangedEvent, CellClassParams, CellDoubleClickedEvent, CellKeyDownEvent, CellContextMenuEvent, GridApi } from "ag-grid-community";
+import type { ColDef, CellValueChangedEvent, CellClassParams, CellDoubleClickedEvent, CellContextMenuEvent, GridApi } from "ag-grid-community";
 import { themeAlpine, colorSchemeDark } from "ag-grid-community";
 import { invoke } from "@tauri-apps/api/core";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore } from "../../store/useAppStore";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -37,6 +38,7 @@ function formatDatetimeValue(value: unknown, colInfo: ColumnInfo | undefined, fm
 }
 
 const darkTheme = themeAlpine.withPart(colorSchemeDark);
+const COPY_HINT = /mac/i.test(navigator.platform) ? "⌘C" : "Ctrl+C";
 
 interface CellEdit {
   rowIndex: number;
@@ -64,8 +66,10 @@ interface CellContextMenuState {
   y: number;
   rowIndex: number;
   column: string;
+  value: unknown;
   isAlreadyNull: boolean;
   isInserted: boolean;
+  canSetNull: boolean;
 }
 
 interface EditableDataGridProps {
@@ -81,14 +85,11 @@ interface EditableDataGridProps {
   onGridReady?: (api: GridApi) => void;
 }
 
-function isColumnEditable(col: ColumnInfo, isInsertedRow: boolean): boolean {
+function isColumnEditable(col: ColumnInfo): boolean {
   if (col.column_type.toLowerCase().includes("blob") || col.column_type.toLowerCase().includes("binary")) {
     return false;
   }
   if (col.extra.toLowerCase().includes("generated")) {
-    return false;
-  }
-  if (!isInsertedRow && col.extra.toLowerCase().includes("auto_increment")) {
     return false;
   }
   return true;
@@ -166,6 +167,7 @@ export function EditableDataGrid({
   })));
 
   const gridRef = useRef<AgGridReact>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const originalRowCount = result.rows.length;
 
   const [editedCells, setEditedCells] = useState<Map<string, CellEdit>>(new Map());
@@ -235,10 +237,9 @@ export function EditableDataGrid({
         editable: usesModal ? false : (params: { node: { data: Record<string, unknown> } }) => {
           if (!colInfo) return true;
           const rowIdx = params.node.data.__rowIndex as number;
-          const isInserted = rowIdx >= originalRowCount;
           const isDeleted = deletedIndices.has(rowIdx);
           if (isDeleted) return false;
-          return isColumnEditable(colInfo, isInserted);
+          return isColumnEditable(colInfo);
         },
         cellStyle: (params: CellClassParams) => {
           const rowIdx = params.data?.__rowIndex as number;
@@ -282,7 +283,7 @@ export function EditableDataGrid({
 
     const rowIdx = event.data.__rowIndex as number;
     if (deletedIndices.has(rowIdx)) return;
-    if (!isColumnEditable(colInfo, rowIdx >= originalRowCount)) return;
+    if (!isColumnEditable(colInfo)) return;
 
     const currentValue = event.data[col];
 
@@ -374,18 +375,29 @@ export function EditableDataGrid({
     setTextEditor(null);
   }, [textEditor, originalRowCount, originalData]);
 
-  // Ctrl+C / Cmd+C copies focused cell value when not in edit mode
-  const onCellKeyDown = useCallback((event: CellKeyDownEvent) => {
-    const keyEvent = event.event as KeyboardEvent | null;
-    if (!keyEvent) return;
-    if ((keyEvent.ctrlKey || keyEvent.metaKey) && keyEvent.key === "c") {
-      // Don't interfere with native copy when editing a cell
-      if (event.api.getEditingCells().length > 0) return;
-      keyEvent.preventDefault();
-      const value = event.value;
+  // Ctrl+C / Cmd+C copies focused cell value when not in edit mode.
+  // Uses DOM capture-phase listener on the container to reliably intercept the event
+  // when AG Grid multiRow selection is active (AG Grid may not fire onCellKeyDown in that mode).
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key !== "c") return;
+      const api = gridRef.current?.api;
+      if (!api) return;
+      if (api.getEditingCells().length > 0) return;
+      const focused = api.getFocusedCell();
+      if (!focused) return;
+      const row = api.getDisplayedRowAtIndex(focused.rowIndex);
+      if (!row?.data) return;
+      const colId = focused.column.getColId();
+      const value = row.data[colId];
       const text = value === null || value === undefined ? "" : String(value);
-      navigator.clipboard.writeText(text).catch(console.error);
-    }
+      e.preventDefault();
+      writeText(text).catch(console.error);
+    };
+    el.addEventListener("keydown", handler, true);
+    return () => el.removeEventListener("keydown", handler, true);
   }, []);
 
   const onCellContextMenu = useCallback((event: CellContextMenuEvent) => {
@@ -393,12 +405,11 @@ export function EditableDataGrid({
     const col = event.colDef.field;
     if (!col) return;
     const colInfo = columnInfos.find((c) => c.field === col);
-    // Only show the menu for nullable, editable columns
-    if (!colInfo || !colInfo.nullable) return;
     const rowIdx = event.data.__rowIndex as number;
-    if (deletedIndices.has(rowIdx)) return;
+    const isDeleted = deletedIndices.has(rowIdx);
     const isInserted = rowIdx >= originalRowCount;
-    if (!isColumnEditable(colInfo, isInserted)) return;
+
+    const canSetNull = !isDeleted && !!colInfo && colInfo.nullable && isColumnEditable(colInfo);
 
     const mouseEvent = event.event as MouseEvent;
     const x = Math.min(mouseEvent.clientX, window.innerWidth - 170);
@@ -408,8 +419,10 @@ export function EditableDataGrid({
       y,
       rowIndex: rowIdx,
       column: col,
+      value: event.value,
       isAlreadyNull: event.value === null || event.value === undefined,
       isInserted,
+      canSetNull,
     });
   }, [columnInfos, deletedIndices, originalRowCount]);
 
@@ -438,6 +451,14 @@ export function EditableDataGrid({
     }
     setCellContextMenu(null);
   }, [cellContextMenu, originalRowCount, originalData]);
+
+  const handleCopy = useCallback(() => {
+    if (!cellContextMenu) return;
+    const text = cellContextMenu.value === null || cellContextMenu.value === undefined
+      ? "" : String(cellContextMenu.value);
+    writeText(text).catch(console.error);
+    setCellContextMenu(null);
+  }, [cellContextMenu]);
 
   const onCellValueChanged = useCallback((event: CellValueChangedEvent) => {
     const rowIdx = event.data.__rowIndex as number;
@@ -680,7 +701,7 @@ export function EditableDataGrid({
       </div>
 
       {/* Grid */}
-      <div style={{ flex: 1 }} onContextMenu={(e) => e.preventDefault()}>
+      <div ref={containerRef} style={{ flex: 1 }} onContextMenu={(e) => e.preventDefault()}>
         <AgGridReact
           ref={gridRef}
           theme={darkTheme}
@@ -696,7 +717,6 @@ export function EditableDataGrid({
           headerHeight={28}
           stopEditingWhenCellsLoseFocus={true}
           onCellValueChanged={onCellValueChanged}
-          onCellKeyDown={onCellKeyDown}
           onCellDoubleClicked={onCellDoubleClicked}
           onCellContextMenu={onCellContextMenu}
           onFilterChanged={(e) => onFilterChanged?.(e.api)}
@@ -936,14 +956,12 @@ export function EditableDataGrid({
                 padding: "5px 10px",
                 background: "none",
                 border: "none",
-                cursor: cellContextMenu.isAlreadyNull ? "default" : "pointer",
-                color: cellContextMenu.isAlreadyNull ? "var(--text-muted)" : "var(--text)",
+                cursor: "pointer",
+                color: "var(--text)",
                 fontSize: 12,
                 textAlign: "left",
-                opacity: cellContextMenu.isAlreadyNull ? 0.5 : 1,
               }}
-              onClick={cellContextMenu.isAlreadyNull ? undefined : handleSetNull}
-              disabled={cellContextMenu.isAlreadyNull}
+              onClick={handleCopy}
             >
               <span
                 style={{
@@ -957,15 +975,51 @@ export function EditableDataGrid({
                   letterSpacing: "0.03em",
                 }}
               >
-                NULL
+                {COPY_HINT}
               </span>
-              Set to NULL
-              {cellContextMenu.isAlreadyNull && (
-                <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-muted)", paddingLeft: 8 }}>
-                  already null
-                </span>
-              )}
+              Copy Value
             </button>
+            {cellContextMenu.canSetNull && (
+              <button
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  width: "100%",
+                  padding: "5px 10px",
+                  background: "none",
+                  border: "none",
+                  cursor: cellContextMenu.isAlreadyNull ? "default" : "pointer",
+                  color: cellContextMenu.isAlreadyNull ? "var(--text-muted)" : "var(--text)",
+                  fontSize: 12,
+                  textAlign: "left",
+                  opacity: cellContextMenu.isAlreadyNull ? 0.5 : 1,
+                }}
+                onClick={cellContextMenu.isAlreadyNull ? undefined : handleSetNull}
+                disabled={cellContextMenu.isAlreadyNull}
+              >
+                <span
+                  style={{
+                    fontFamily: "monospace",
+                    fontSize: 10,
+                    background: "var(--bg-surface)",
+                    padding: "1px 5px",
+                    borderRadius: 3,
+                    color: "var(--text-muted)",
+                    border: "1px solid var(--border)",
+                    letterSpacing: "0.03em",
+                  }}
+                >
+                  NULL
+                </span>
+                Set to NULL
+                {cellContextMenu.isAlreadyNull && (
+                  <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-muted)", paddingLeft: 8 }}>
+                    already null
+                  </span>
+                )}
+              </button>
+            )}
           </div>
         </>
       )}

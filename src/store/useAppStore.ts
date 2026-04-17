@@ -209,15 +209,21 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   reconnectSession: async (sessionId) => {
     const session = get().sessions.find((s) => s.id === sessionId);
-    if (!session || session.connectionId) return;
+    if (!session) return;
     set({ reconnectingSessionId: sessionId, reconnectError: null });
     try {
+      // Clean up stale pool first (best-effort — ignore if already gone)
+      if (session.connectionId) {
+        await (invoke("disconnect", { connectionId: session.connectionId }) as Promise<void>).catch(() => {});
+      }
       const connectionId = await invoke<string>("connect", {
         config: session.connectionConfig as ConnectionConfig,
       });
       get().updateSessionConnectionId(sessionId, connectionId);
     } catch (e) {
       set({ reconnectError: String(e) });
+      // Mark as disconnected so the reconnect overlay appears
+      get().updateSessionConnectionId(sessionId, "");
     } finally {
       set({ reconnectingSessionId: null });
     }

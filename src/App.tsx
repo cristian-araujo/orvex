@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { invoke } from "@tauri-apps/api/core";
 import { useShallow } from "zustand/react/shallow";
@@ -302,6 +302,40 @@ export default function App() {
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, []);
+
+  // Verify that all active connections are still alive. Called when the window
+  // becomes visible again or when the network comes back online. Any session
+  // whose pool is no longer reachable gets its connectionId cleared so the
+  // reconnect overlay appears immediately instead of silently failing on use.
+  const checkConnectionHealth = useCallback(async () => {
+    const state = useAppStore.getState();
+    if (state.isRestoring) return;
+    await Promise.allSettled(
+      state.sessions
+        .filter((s) => s.connectionId)
+        .map(async (session) => {
+          try {
+            const dbs = await invoke<string[]>("get_databases", { connectionId: session.connectionId });
+            state.setDatabasesForSession(session.id, dbs);
+          } catch {
+            state.updateSessionConnectionId(session.id, "");
+          }
+        }),
+    );
+  }, []);
+
+  // Health check when the tab/window becomes visible after being in the background
+  useEffect(() => {
+    const handler = () => { if (!document.hidden) checkConnectionHealth(); };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [checkConnectionHealth]);
+
+  // Health check when the network comes back after being offline
+  useEffect(() => {
+    window.addEventListener("online", checkConnectionHealth);
+    return () => window.removeEventListener("online", checkConnectionHealth);
+  }, [checkConnectionHealth]);
 
   // Keyboard shortcuts
   useEffect(() => {

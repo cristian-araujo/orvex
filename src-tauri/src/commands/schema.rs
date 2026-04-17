@@ -298,6 +298,48 @@ pub async fn drop_database(
 }
 
 #[tauri::command]
+pub async fn get_table_auto_increment(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+    table: String,
+) -> Result<Option<u64>, String> {
+    let pool = state.get_pool(&connection_id)?;
+    let row = sqlx::query(
+        "SELECT AUTO_INCREMENT FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
+    )
+    .bind(&database)
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(row.try_get::<Option<u64>, _>(0).unwrap_or(None))
+}
+
+#[tauri::command]
+pub async fn set_table_auto_increment(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+    table: String,
+    value: u64,
+) -> Result<(), String> {
+    let pool = state.get_pool(&connection_id)?;
+    let sql = format!(
+        "ALTER TABLE `{}`.`{}` AUTO_INCREMENT = {}",
+        crate::commands::query::sanitize_ident(&database),
+        crate::commands::query::sanitize_ident(&table),
+        value,  // u64 — no riesgo de inyección
+    );
+    sqlx::raw_sql(&sql)
+        .execute(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn drop_all_tables(
     state: State<'_, ConnectionManager>,
     connection_id: String,
