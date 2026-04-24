@@ -6,7 +6,7 @@ import { useAppStore, getActiveSession } from "./store/useAppStore";
 import { APP_NAME } from "./appConfig";
 import { ConnectionDialog } from "./components/ConnectionManager/ConnectionDialog";
 import { ObjectBrowser } from "./components/ObjectBrowser/ObjectBrowser";
-import { SqlEditor } from "./components/SqlEditor/SqlEditor";
+import { SqlEditor, sqlEditorBridge } from "./components/SqlEditor/SqlEditor";
 import { ResultsGrid } from "./components/ResultsGrid/ResultsGrid";
 import { TableStructure } from "./components/TableStructure/TableStructure";
 import { Toolbar } from "./components/Layout/Toolbar";
@@ -135,7 +135,27 @@ function QueryTabs() {
           +
         </button>
       </div>
-      {/* Execute button */}
+      {/* Execute Current Statement button */}
+      <button
+        onClick={() => sqlEditorBridge.executeCurrentStatement()}
+        disabled={!canExecute}
+        style={{
+          background: "transparent",
+          border: "none",
+          color: canExecute ? "var(--success)" : "var(--text-muted)",
+          padding: "0 10px",
+          height: "100%",
+          fontSize: 12,
+          cursor: canExecute ? "pointer" : "default",
+          opacity: canExecute ? 1 : 0.4,
+          flexShrink: 0,
+          borderLeft: "1px solid var(--border)",
+        }}
+        title="Execute Current Statement (Ctrl+Enter)"
+      >
+        ▶| Execute Current
+      </button>
+      {/* Execute (full tab) button */}
       <button
         onClick={execute}
         disabled={!canExecute}

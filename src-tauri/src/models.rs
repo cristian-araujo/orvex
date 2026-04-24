@@ -179,6 +179,10 @@ pub struct ImportOptions {
     /// STRICT_TRANS_TABLES) that reject DEFAULT '0000-00-00 00:00:00' — common in
     /// legacy dumps generated on MySQL 5.6 or servers without strict mode.
     pub disable_strict_mode: bool,
+    /// When true, FULLTEXT index definitions are extracted from CREATE TABLE statements
+    /// and deferred to ALTER TABLE statements executed after all data is loaded.
+    /// Bulk reconstruction is 5–20x faster than incremental updates during INSERT.
+    pub defer_fulltext: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +209,8 @@ pub struct ImportProgressPayload {
     pub current_statement_preview: String,
     pub elapsed_ms: u64,
     pub error: Option<String>,
+    // Last non-fatal error when stop_on_error = false; None when no errors yet.
+    pub last_error: Option<String>,
 }
 
 // --- Charset / Collation ---
@@ -214,6 +220,20 @@ pub struct CharsetInfo {
     pub charset: String,
     pub description: String,
     pub default_collation: String,
+}
+
+// --- Server-side filters & sort ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilterEntry {
+    pub column: String,
+    pub model: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SortEntry {
+    pub column: String,
+    pub direction: String,
 }
 
 // --- Data editing ---

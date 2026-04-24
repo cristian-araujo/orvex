@@ -65,6 +65,11 @@ fn emit_progress(app: &AppHandle, payload: &ImportProgressPayload) {
 struct SqlParser {
     delimiter: String,
     buffer: String,
+    // Byte offset into `buffer` where the next scan should resume. Without
+    // this, feed_line re-scans from 0 on every call, giving O(n × total_size)
+    // complexity for extended INSERT statements (one row per line). With the
+    // offset we scan only newly appended bytes — O(total_size) overall.
+    scan_offset: usize,
     in_single_quote: bool,
     in_double_quote: bool,
     in_backtick: bool,
@@ -77,6 +82,7 @@ impl SqlParser {
         Self {
             delimiter: ";".to_string(),
             buffer: String::new(),
+            scan_offset: 0,
             in_single_quote: false,
             in_double_quote: false,
             in_backtick: false,
@@ -117,6 +123,12 @@ impl SqlParser {
             }
         }
 
+        // Compute the resume point before appending. Back up by (delim_len-1)
+        // so a delimiter that straddles the old/new content boundary is not missed.
+        let delim_bytes = self.delimiter.as_bytes();
+        let delim_len = delim_bytes.len();
+        let scan_start = self.scan_offset.saturating_sub(delim_len.saturating_sub(1));
+
         // Append line to buffer with newline
         if !self.buffer.is_empty() {
             self.buffer.push('\n');
@@ -126,11 +138,9 @@ impl SqlParser {
         // Byte-level scan. Splitting at `i` is always safe because we only
         // split at positions occupied by ASCII bytes (delimiter chars), and
         // UTF-8 guarantees no multi-byte sequence contains an ASCII byte.
-        let delim_bytes = self.delimiter.as_bytes();
-        let delim_len = delim_bytes.len();
         let bytes = self.buffer.as_bytes();
         let len = bytes.len();
-        let mut i = 0;
+        let mut i = scan_start; // resume from last known-safe position, not 0
 
         while i < len {
             if self.escape_next {
@@ -250,6 +260,7 @@ impl SqlParser {
                         }
                         // Keep everything after the delimiter for the next parse
                         self.buffer = self.buffer[i + delim_len..].to_string();
+                        self.scan_offset = 0; // new buffer content, restart scan
                         let mut more = self.process_remaining();
                         statements.append(&mut more);
                         return statements;
@@ -259,6 +270,11 @@ impl SqlParser {
             }
         }
 
+        // No delimiter found — advance offset so the next call skips already-
+        // scanned bytes. Back up by (delim_len-1) to handle delimiters that
+        // might straddle the next line boundary.
+        self.scan_offset = len.saturating_sub(delim_len.saturating_sub(1));
+
         statements
     }
 
@@ -266,10 +282,12 @@ impl SqlParser {
     fn process_remaining(&mut self) -> Vec<String> {
         if self.buffer.trim().is_empty() {
             self.buffer.clear();
+            self.scan_offset = 0;
             return Vec::new();
         }
         let buf = self.buffer.clone();
         self.buffer.clear();
+        self.scan_offset = 0;
         self.in_single_quote = false;
         self.in_double_quote = false;
         self.in_backtick = false;
@@ -306,9 +324,9 @@ impl SqlParser {
 // paren-depth 0, outside string literals), so UTF-8 data inside string values
 // is never corrupted.
 
-const INSERT_CHUNK_ROWS: usize = 5000;
-const INSERT_CHUNK_BYTES: usize = 1_048_576;        // 1 MiB hard cap per statement
-const TRANSACTION_BATCH_STATEMENTS: u64 = 500;      // COMMIT every N statements
+const INSERT_CHUNK_ROWS: usize = 500;
+const INSERT_CHUNK_BYTES: usize = 262_144;           // 256 KiB hard cap per statement
+const TRANSACTION_BATCH_STATEMENTS: u64 = 50;       // COMMIT every N statements
 
 fn split_insert_chunks(stmt: &str) -> Vec<String> {
     // Quick checks: must start with INSERT and be large enough to bother
@@ -479,6 +497,75 @@ fn split_insert_chunks(stmt: &str) -> Vec<String> {
         .collect()
 }
 
+// --- FULLTEXT deferral ---
+//
+// mysqldump FULLTEXT indexes are updated row-by-row during INSERT on InnoDB,
+// causing visible freezes in the progress bar for large WordPress dumps.
+// This function strips FULLTEXT definitions from CREATE TABLE and returns them
+// as ALTER TABLE statements to be executed after all data is loaded, where
+// InnoDB rebuilds the index in bulk (5–20x faster).
+
+fn extract_fulltext(stmt: &str) -> (String, Vec<String>) {
+    let upper_prefix = stmt.trim_start().get(..12).unwrap_or("").to_ascii_uppercase();
+    if upper_prefix != "CREATE TABLE" || !stmt.to_ascii_uppercase().contains("FULLTEXT") {
+        return (stmt.to_string(), Vec::new());
+    }
+
+    // Extract table name, handling optional IF NOT EXISTS and backtick quoting.
+    let table_name = {
+        let upper = stmt.to_ascii_uppercase();
+        let start = match upper.find("CREATE TABLE ") {
+            Some(p) => p + 13,
+            None => return (stmt.to_string(), Vec::new()),
+        };
+        let rest = stmt[start..].trim_start();
+        let rest = if rest.to_ascii_uppercase().starts_with("IF NOT EXISTS") {
+            rest[13..].trim_start()
+        } else {
+            rest
+        };
+        if rest.starts_with('`') {
+            match rest[1..].find('`') {
+                Some(end) => rest[..end + 2].to_string(),
+                None => return (stmt.to_string(), Vec::new()),
+            }
+        } else {
+            match rest.find(|c: char| c.is_whitespace() || c == '(') {
+                Some(end) => rest[..end].to_string(),
+                None => return (stmt.to_string(), Vec::new()),
+            }
+        }
+    };
+
+    let mut keep: Vec<String> = Vec::new();
+    let mut deferred: Vec<String> = Vec::new();
+
+    for line in stmt.lines() {
+        let trimmed = line.trim();
+        if trimmed.to_ascii_uppercase().starts_with("FULLTEXT") {
+            let def = trimmed.trim_end_matches(',').trim();
+            deferred.push(format!("ALTER TABLE {} ADD {}", table_name, def));
+        } else {
+            keep.push(line.to_string());
+        }
+    }
+
+    if deferred.is_empty() {
+        return (stmt.to_string(), Vec::new());
+    }
+
+    // The line before the closing ')' may have a trailing comma that was valid
+    // only because a FULLTEXT line followed it. Remove that comma now.
+    if let Some(close_pos) = keep.iter().position(|l| l.trim_start().starts_with(')')) {
+        if close_pos > 0 {
+            let last = keep[close_pos - 1].trim_end_matches(',').to_string();
+            keep[close_pos - 1] = last;
+        }
+    }
+
+    (keep.join("\n"), deferred)
+}
+
 // --- Import logic ---
 
 async fn do_import(
@@ -505,6 +592,7 @@ async fn do_import(
                 current_statement_preview: String::new(),
                 elapsed_ms: 0,
                 error: Some(format!("Cannot read file: {}", e)),
+                last_error: None,
             });
             return;
         }
@@ -523,6 +611,7 @@ async fn do_import(
                 current_statement_preview: String::new(),
                 elapsed_ms: 0,
                 error: Some(format!("Cannot open file: {}", e)),
+                last_error: None,
             });
             return;
         }
@@ -547,6 +636,7 @@ async fn do_import(
                 current_statement_preview: String::new(),
                 elapsed_ms: start.elapsed().as_millis() as u64,
                 error: Some(format!("Cannot acquire connection: {}", e)),
+                last_error: None,
             });
             unregister_cancel(&operation_id);
             return;
@@ -586,6 +676,7 @@ async fn do_import(
                 current_statement_preview: set_mode.to_string(),
                 elapsed_ms: start.elapsed().as_millis() as u64,
                 error: Some(format!("Cannot set sql_mode: {}", e)),
+                last_error: None,
             });
             unregister_cancel(&operation_id);
             return;
@@ -608,6 +699,7 @@ async fn do_import(
                 current_statement_preview: use_sql,
                 elapsed_ms: start.elapsed().as_millis() as u64,
                 error: Some(format!("Cannot switch database: {}", e)),
+                last_error: None,
             });
             unregister_cancel(&operation_id);
             return;
@@ -629,6 +721,7 @@ async fn do_import(
             current_statement_preview: "SET autocommit = 0".to_string(),
             elapsed_ms: start.elapsed().as_millis() as u64,
             error: Some(format!("Cannot set autocommit: {}", e)),
+            last_error: None,
         });
         unregister_cancel(&operation_id);
         return;
@@ -638,7 +731,9 @@ async fn do_import(
     let mut bytes_read: u64 = 0;
     let mut statements_executed: u64 = 0;
     let mut errors_count: u64 = 0;
+    let mut last_error: Option<String> = None;
     let mut last_progress = std::time::Instant::now();
+    let mut deferred_fulltext: Vec<String> = Vec::new();
 
     for line_result in reader.lines() {
         if cancel.load(Ordering::Relaxed) {
@@ -653,6 +748,7 @@ async fn do_import(
                 current_statement_preview: String::new(),
                 elapsed_ms: start.elapsed().as_millis() as u64,
                 error: None,
+                last_error: last_error.clone(),
             });
             unregister_cancel(&operation_id);
             return;
@@ -669,6 +765,20 @@ async fn do_import(
                     if trimmed.is_empty() {
                         continue;
                     }
+
+                    // Only inspect CREATE TABLE statements for FULLTEXT deferral.
+                    // Calling extract_fulltext on INSERT/SET/etc. would clone the
+                    // entire (potentially large) statement for no benefit.
+                    let stmt_modified: Option<String> = if options.defer_fulltext
+                        && trimmed.get(..12).map_or(false, |p| p.eq_ignore_ascii_case("CREATE TABLE"))
+                    {
+                        let (modified, mut ft_stmts) = extract_fulltext(trimmed);
+                        deferred_fulltext.append(&mut ft_stmts);
+                        Some(modified)
+                    } else {
+                        None
+                    };
+                    let trimmed = stmt_modified.as_deref().unwrap_or(trimmed);
 
                     // Split large INSERT ... VALUES statements into chunks of
                     // INSERT_CHUNK_ROWS rows each. For all other statement types
@@ -688,6 +798,7 @@ async fn do_import(
                                 current_statement_preview: String::new(),
                                 elapsed_ms: start.elapsed().as_millis() as u64,
                                 error: None,
+                                last_error: last_error.clone(),
                             });
                             unregister_cancel(&operation_id);
                             return;
@@ -718,6 +829,7 @@ async fn do_import(
                                 current_statement_preview: preview.clone(),
                                 elapsed_ms: start.elapsed().as_millis() as u64,
                                 error: None,
+                                last_error: last_error.clone(),
                             });
                             last_progress = std::time::Instant::now();
                         }
@@ -747,11 +859,13 @@ async fn do_import(
                                         current_statement_preview: String::new(),
                                         elapsed_ms: start.elapsed().as_millis() as u64,
                                         error: None,
+                                        last_error: last_error.clone(),
                                     });
                                     unregister_cancel(&operation_id);
                                     return;
                                 }
                                 errors_count += 1;
+                                last_error = Some(e.to_string());
                                 if options.stop_on_error {
                                     let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
                                     emit_progress(&app, &ImportProgressPayload {
@@ -764,6 +878,7 @@ async fn do_import(
                                         current_statement_preview: preview,
                                         elapsed_ms: start.elapsed().as_millis() as u64,
                                         error: Some(e.to_string()),
+                                        last_error: last_error.clone(),
                                     });
                                     unregister_cancel(&operation_id);
                                     return;
@@ -783,6 +898,7 @@ async fn do_import(
                                 current_statement_preview: preview.clone(),
                                 elapsed_ms: start.elapsed().as_millis() as u64,
                                 error: None,
+                                last_error: last_error.clone(),
                             });
                             last_progress = std::time::Instant::now();
                         }
@@ -800,6 +916,7 @@ async fn do_import(
                     current_statement_preview: String::new(),
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     error: Some(format!("File read error: {}", e)),
+                    last_error: last_error.clone(),
                 });
                 unregister_cancel(&operation_id);
                 return;
@@ -811,34 +928,137 @@ async fn do_import(
     if let Some(stmt) = parser.flush() {
         let trimmed = stmt.trim();
         if !trimmed.is_empty() {
-            let preview: String = if trimmed.len() > 100 {
-                format!("{}...", &trimmed[..100])
+            let stmt_modified: Option<String> = if options.defer_fulltext
+                && trimmed.get(..12).map_or(false, |p| p.eq_ignore_ascii_case("CREATE TABLE"))
+            {
+                let (modified, mut ft_stmts) = extract_fulltext(trimmed);
+                deferred_fulltext.append(&mut ft_stmts);
+                Some(modified)
             } else {
-                trimmed.to_string()
+                None
             };
+            let trimmed = stmt_modified.as_deref().unwrap_or(trimmed);
 
-            match sqlx::raw_sql(trimmed).execute(&mut *conn).await {
-                Ok(_) => {
-                    statements_executed += 1;
-                }
-                Err(e) => {
-                    errors_count += 1;
-                    if options.stop_on_error {
-                        let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
-                        emit_progress(&app, &ImportProgressPayload {
-                            operation_id: operation_id.clone(),
-                            phase: "error".to_string(),
-                            bytes_read,
-                            bytes_total,
-                            statements_executed,
-                            errors_count,
-                            current_statement_preview: preview,
-                            elapsed_ms: start.elapsed().as_millis() as u64,
-                            error: Some(e.to_string()),
-                        });
-                        unregister_cancel(&operation_id);
-                        return;
+            if !trimmed.is_empty() {
+                let preview: String = if trimmed.len() > 100 {
+                    format!("{}...", &trimmed[..100])
+                } else {
+                    trimmed.to_string()
+                };
+
+                match sqlx::raw_sql(trimmed).execute(&mut *conn).await {
+                    Ok(_) => {
+                        statements_executed += 1;
                     }
+                    Err(e) => {
+                        errors_count += 1;
+                        last_error = Some(e.to_string());
+                        if options.stop_on_error {
+                            let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+                            emit_progress(&app, &ImportProgressPayload {
+                                operation_id: operation_id.clone(),
+                                phase: "error".to_string(),
+                                bytes_read,
+                                bytes_total,
+                                statements_executed,
+                                errors_count,
+                                current_statement_preview: preview,
+                                elapsed_ms: start.elapsed().as_millis() as u64,
+                                error: Some(e.to_string()),
+                                last_error: last_error.clone(),
+                            });
+                            unregister_cancel(&operation_id);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Deferred FULLTEXT indexes ---
+    // All data is committed before building indexes. ALTER TABLE on FULLTEXT
+    // issues an implicit COMMIT, so ROLLBACK here is a no-op but kept for
+    // consistency with the cancel pattern above.
+    let ft_total = deferred_fulltext.len();
+    for (ft_idx, alter_sql) in deferred_fulltext.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+            emit_progress(&app, &ImportProgressPayload {
+                operation_id: operation_id.clone(),
+                phase: "cancelled".to_string(),
+                bytes_read,
+                bytes_total,
+                statements_executed,
+                errors_count,
+                current_statement_preview: String::new(),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                error: None,
+                last_error: last_error.clone(),
+            });
+            unregister_cancel(&operation_id);
+            return;
+        }
+
+        let preview = format!(
+            "Building FULLTEXT index {}/{}: {}",
+            ft_idx + 1,
+            ft_total,
+            if alter_sql.len() > 80 { &alter_sql[..80] } else { alter_sql.as_str() }
+        );
+        emit_progress(&app, &ImportProgressPayload {
+            operation_id: operation_id.clone(),
+            phase: "indexing".to_string(),
+            current_statement_preview: preview.clone(),
+            bytes_read,
+            bytes_total,
+            statements_executed,
+            errors_count,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+            error: None,
+            last_error: last_error.clone(),
+        });
+
+        match sqlx::raw_sql(alter_sql.as_str()).execute(&mut *conn).await {
+            Ok(_) => {
+                statements_executed += 1;
+            }
+            Err(e) => {
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+                    emit_progress(&app, &ImportProgressPayload {
+                        operation_id: operation_id.clone(),
+                        phase: "cancelled".to_string(),
+                        bytes_read,
+                        bytes_total,
+                        statements_executed,
+                        errors_count,
+                        current_statement_preview: String::new(),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        error: None,
+                        last_error: last_error.clone(),
+                    });
+                    unregister_cancel(&operation_id);
+                    return;
+                }
+                errors_count += 1;
+                last_error = Some(e.to_string());
+                if options.stop_on_error {
+                    let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+                    emit_progress(&app, &ImportProgressPayload {
+                        operation_id: operation_id.clone(),
+                        phase: "error".to_string(),
+                        bytes_read,
+                        bytes_total,
+                        statements_executed,
+                        errors_count,
+                        current_statement_preview: preview,
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        error: Some(e.to_string()),
+                        last_error: last_error.clone(),
+                    });
+                    unregister_cancel(&operation_id);
+                    return;
                 }
             }
         }
@@ -855,6 +1075,7 @@ async fn do_import(
         current_statement_preview: String::new(),
         elapsed_ms: start.elapsed().as_millis() as u64,
         error: None,
+        last_error: last_error.clone(),
     });
 
     unregister_cancel(&operation_id);
@@ -919,19 +1140,26 @@ pub async fn cancel_import(operation_id: String) -> Result<(), String> {
     };
 
     if let Some((pool, tid)) = kill_task {
-        // Fire-and-forget: acquire a second connection and kill the active query.
-        // Uses spawn_blocking + block_on (same pattern as do_import) to avoid the
-        // HRTB on Executor<'_> that prevents tokio::spawn from working with raw_sql.
-        // If the import finishes before KILL reaches MySQL, it's a harmless no-op.
+        // KILL CONNECTION (not KILL QUERY) forcefully closes the MySQL connection,
+        // making execute() on the import thread return immediately with a connection
+        // error. KILL QUERY is insufficient for operations that MySQL marks as
+        // non-interruptible (e.g. large INSERTs on FULLTEXT-indexed tables).
+        //
+        // Await with a 5s timeout so cancel_import always returns in bounded time.
+        // If the kill fails or pool.acquire() times out, the cancel flag is already
+        // set and do_import will detect it at the next statement boundary.
         let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            handle.block_on(async move {
-                let kill_sql = format!("KILL QUERY {}", tid);
-                if let Ok(mut conn) = pool.acquire().await {
-                    let _ = sqlx::raw_sql(&kill_sql).execute(&mut *conn).await;
-                }
-            });
-        });
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                handle.block_on(async move {
+                    let kill_sql = format!("KILL CONNECTION {}", tid);
+                    if let Ok(mut conn) = pool.acquire().await {
+                        let _ = sqlx::raw_sql(&kill_sql).execute(&mut *conn).await;
+                    }
+                });
+            }),
+        ).await;
     }
 
     Ok(())

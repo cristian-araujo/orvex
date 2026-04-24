@@ -86,6 +86,11 @@ export interface TableStructure {
   create_sql: string;
 }
 
+export interface SortEntry {
+  column: string;
+  direction: "asc" | "desc";
+}
+
 export type TabType = "query" | "table";
 
 export interface QueryTab {
@@ -132,12 +137,16 @@ export interface ConnectionSession {
   dataDatabase: string | null;
   dataTable: string | null;
   dataColumns: ColumnInfo[] | null;
+  dataForeignKeys: ForeignKeyInfo[] | null;
   dataPrimaryKeys: string[];
   // Loading & pagination
   isLoadingData: boolean;
   dataPage: number;
   dataPageSize: number;
   dataTotalRows: number | null;
+  // Server-side filters & sort
+  dataFilterModel: Record<string, unknown> | null;
+  dataSort: SortEntry[] | null;
 }
 
 // --- Data editing ---
@@ -192,6 +201,8 @@ export interface ImportOptions {
   stop_on_error: boolean;
   /** Disables strict SQL modes (NO_ZERO_DATE, etc.) for legacy dump compatibility. */
   disable_strict_mode: boolean;
+  /** Defers FULLTEXT index creation to after data load — bulk rebuild is 5–20x faster. */
+  defer_fulltext: boolean;
 }
 
 export interface ExportProgressPayload {
@@ -208,7 +219,7 @@ export interface ExportProgressPayload {
 
 export interface ImportProgressPayload {
   operation_id: string;
-  phase: "executing" | "complete" | "error" | "cancelled";
+  phase: "executing" | "indexing" | "complete" | "error" | "cancelled";
   bytes_read: number;
   bytes_total: number;
   statements_executed: number;
@@ -216,6 +227,7 @@ export interface ImportProgressPayload {
   current_statement_preview: string;
   elapsed_ms: number;
   error: string | null;
+  last_error: string | null;
 }
 
 // --- Charset / Collation ---

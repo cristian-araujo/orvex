@@ -4,7 +4,8 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { HexColorPicker, HexColorInput } from "react-colorful";
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore, getActiveSession } from "../../store/useAppStore";
-import { UNLIMITED_PAGE_SIZE, type ColumnInfo } from "../../types";
+import { UNLIMITED_PAGE_SIZE, type ColumnInfo, type ForeignKeyInfo } from "../../types";
+import { setCached, makeDataKey } from "../../store/queryCache";
 import { ConfirmDialog } from "../ResultsGrid/ConfirmDialog";
 import {
   ContextMenu,
@@ -64,8 +65,9 @@ export function ObjectBrowser() {
   const {
     setDatabases, setDatabasesForSession, toggleDb, setTables, setExpandedTables, setColumns,
     setSelectedDatabase, setShowColorEditor, setShowExportDialog, setShowImportDialog, addQueryTab, addTableTab,
-    updateActiveConnectionConfig, setDataResult, setDbFilter, setTableFilter,
+    updateActiveConnectionConfig, setDataResult, setDataForeignKeys, setDbFilter, setTableFilter,
     setLoadingData, setDataPage, setDataTotalRows, setDataPageSize,
+    setDataFilterModel, setDataSort,
   } = useAppStore(useShallow(s => ({
     setDatabases: s.setDatabases,
     setDatabasesForSession: s.setDatabasesForSession,
@@ -81,12 +83,15 @@ export function ObjectBrowser() {
     addTableTab: s.addTableTab,
     updateActiveConnectionConfig: s.updateActiveConnectionConfig,
     setDataResult: s.setDataResult,
+    setDataForeignKeys: s.setDataForeignKeys,
     setDbFilter: s.setDbFilter,
     setTableFilter: s.setTableFilter,
     setLoadingData: s.setLoadingData,
     setDataPage: s.setDataPage,
     setDataTotalRows: s.setDataTotalRows,
     setDataPageSize: s.setDataPageSize,
+    setDataFilterModel: s.setDataFilterModel,
+    setDataSort: s.setDataSort,
   })));
 
   // Per-connection Object Browser colors
@@ -328,6 +333,11 @@ export function ObjectBrowser() {
     if (!activeConnectionId) return;
     setSelectedDatabase(db);
     const key = tableKey(db, table);
+    // Nueva tabla: resetear filtros y sort
+    if (dataTableName !== key) {
+      setDataFilterModel(null);
+      setDataSort(null);
+    }
     // Skip si la misma tabla ya está cargada en la misma página
     if (dataTableName === key && page === 0) return;
     const requestId = ++previewRequestId.current;
@@ -335,8 +345,8 @@ export function ObjectBrowser() {
     try {
       const { table_data_limit } = useAppStore.getState().settings;
       const pageSize = table_data_limit !== null ? table_data_limit : UNLIMITED_PAGE_SIZE;
-      // Fase 1: cargar datos + columnas en paralelo — mostrar data sin esperar COUNT(*)
-      const [result, cols] = await Promise.all([
+      // Fase 1: cargar datos + columnas + FKs en paralelo — mostrar data sin esperar COUNT(*)
+      const [result, cols, fks] = await Promise.all([
         invoke<import("../../types").QueryResult>("get_table_data", {
           connectionId: activeConnectionId,
           database: db,
@@ -351,28 +361,34 @@ export function ObjectBrowser() {
               database: db,
               table,
             }),
+        invoke<ForeignKeyInfo[]>("get_foreign_keys", {
+          connectionId: activeConnectionId,
+          database: db,
+          table,
+        }).catch(() => [] as ForeignKeyInfo[]),
       ]);
       if (requestId !== previewRequestId.current) return;
       if (!columns[key]) {
         setColumns(key, cols);
       }
+      setCached(makeDataKey(db, table, page, null, null, ""), { result, cols, fks });
       setDataResult(result, `${db}.${table}`, db, table, cols);
+      setDataForeignKeys(fks);
       setDataPage(page);
       setDataPageSize(pageSize);
       setLoadingData(false);
       // Fase 2: COUNT(*) asíncrono — actualiza totalRows sin bloquear el UI
       const offset = page * pageSize;
       if (result.rows.length < pageSize) {
-        // Página incompleta: sabemos el total exacto sin query adicional
         setDataTotalRows(offset + result.rows.length);
       } else {
-        invoke<import("../../types").QueryResult>("execute_query", {
+        invoke<number>("get_table_count", {
           connectionId: activeConnectionId,
-          sql: `SELECT COUNT(*) AS cnt FROM \`${db}\`.\`${table}\``,
-        }).then((countResult) => {
+          database: db,
+          table,
+        }).then((count) => {
           if (requestId !== previewRequestId.current) return;
-          const totalRows = countResult.rows[0]?.[0];
-          setDataTotalRows(typeof totalRows === "number" ? totalRows : Number(totalRows));
+          setDataTotalRows(count);
         }).catch(console.error);
       }
     } catch (e) {

@@ -8,7 +8,8 @@ import { useAppStore, getActiveSession } from "../../store/useAppStore";
 import { EditableDataGrid } from "./EditableDataGrid";
 import { FilterBar } from "./FilterBar";
 import type { ActiveColumnFilter } from "./FilterBar";
-import type { QueryResult, QueryTab } from "../../types";
+import type { QueryResult, QueryTab, SortEntry, ColumnInfo, ForeignKeyInfo } from "../../types";
+import { getCached, setCached, invalidatePrefix, makeDataKey } from "../../store/queryCache";
 
 const darkTheme = themeAlpine.withPart(colorSchemeDark);
 const EMPTY_TABS: QueryTab[] = [];
@@ -137,10 +138,10 @@ function summarizeFilterModel(model: Record<string, unknown>): string {
 export function ResultsGrid() {
   const {
     queryTabs, activeTabId, activeBottomTab,
-    dataResult, dataTableName, dataDatabase, dataTable, dataColumns, dataPrimaryKeys,
+    dataResult, dataTableName, dataDatabase, dataTable, dataColumns, dataForeignKeys, dataPrimaryKeys,
     activeConnectionId, activeSessionId,
     isLoadingData, dataPage, dataPageSize,
-    dataTotalRows,
+    dataTotalRows, dataFilterModel,
   } = useAppStore(useShallow(s => {
     const session = getActiveSession(s);
     return {
@@ -152,6 +153,7 @@ export function ResultsGrid() {
       dataDatabase: session?.dataDatabase ?? null,
       dataTable: session?.dataTable ?? null,
       dataColumns: session?.dataColumns ?? null,
+      dataForeignKeys: session?.dataForeignKeys ?? null,
       dataPrimaryKeys: session?.dataPrimaryKeys ?? EMPTY_PKS,
       activeConnectionId: session?.connectionId ?? null,
       activeSessionId: s.activeSessionId,
@@ -159,15 +161,22 @@ export function ResultsGrid() {
       dataPage: session?.dataPage ?? 0,
       dataPageSize: session?.dataPageSize ?? 1000,
       dataTotalRows: session?.dataTotalRows ?? null,
+      dataFilterModel: session?.dataFilterModel ?? null,
     };
   }));
-  const { setActiveBottomTab, setDataResult, setColumns, setLoadingData, setDataPage, setDataTotalRows } = useAppStore(useShallow(s => ({
+  const {
+    setActiveBottomTab, setDataResult, setDataForeignKeys, setColumns, setLoadingData,
+    setDataPage, setDataTotalRows, setDataFilterModel, setDataSort,
+  } = useAppStore(useShallow(s => ({
     setActiveBottomTab: s.setActiveBottomTab,
     setDataResult: s.setDataResult,
+    setDataForeignKeys: s.setDataForeignKeys,
     setColumns: s.setColumns,
     setLoadingData: s.setLoadingData,
     setDataPage: s.setDataPage,
     setDataTotalRows: s.setDataTotalRows,
+    setDataFilterModel: s.setDataFilterModel,
+    setDataSort: s.setDataSort,
   })));
 
   const activeTab = queryTabs.find((t) => t.id === activeTabId);
@@ -178,6 +187,8 @@ export function ResultsGrid() {
   const [resultsQuickFilter, setResultsQuickFilter] = useState("");
   const [activeColumnFilters, setActiveColumnFilters] = useState<ActiveColumnFilter[]>([]);
   const [filteredRowCount, setFilteredRowCount] = useState<number | null>(null);
+  // Prevents onFilterChanged from re-triggering when we programmatically clear AG-Grid filter model
+  const isServerReloadingRef = useRef(false);
 
   // Total row count derived from the active result's row data
   const totalRowCount = activeBottomTab === "data"
@@ -188,6 +199,7 @@ export function ResultsGrid() {
   const resultsGridRef = useRef<AgGridReact>(null);
   const editableGridApiRef = useRef<GridApi | null>(null);
   const filterInputRef = useRef<HTMLInputElement>(null);
+  const previewRequestId = useRef(0);
 
   // Derived values based on active tab
   const currentQuickFilter = activeBottomTab === "data" ? dataQuickFilter : resultsQuickFilter;
@@ -217,18 +229,153 @@ export function ResultsGrid() {
     setActiveColumnFilters(filters);
   }, []);
 
-  const handleGridFilterChanged = useCallback((api: GridApi) => {
-    extractFilterState(api);
-  }, [extractFilterState]);
-
   // EditableDataGrid notifies us when its grid is ready
   const handleEditableGridReady = useCallback((api: GridApi) => {
     editableGridApiRef.current = api;
     setFilteredRowCount(null);
   }, []);
 
+  // Builds ActiveColumnFilters from the store's dataFilterModel
+  const updateActiveFiltersFromModel = useCallback((model: Record<string, unknown> | null) => {
+    if (!model) {
+      setActiveColumnFilters([]);
+      return;
+    }
+    const filters: ActiveColumnFilter[] = Object.entries(model).map(([column, m]) => ({
+      column,
+      summary: summarizeFilterModel(m as Record<string, unknown>),
+    }));
+    setActiveColumnFilters(filters);
+  }, []);
+
+  // Central reload helper — reads current filter/sort/quickFilter from store + local state
+  const reloadDataWithCurrentState = useCallback(async (page: number) => {
+    if (!activeConnectionId || !dataDatabase || !dataTable) return;
+    const storeState = useAppStore.getState();
+    const session = getActiveSession(storeState);
+    const pageSize = session?.dataPageSize ?? 1000;
+    const filters = session?.dataFilterModel;
+    const sort = session?.dataSort;
+
+    const cacheKey = makeDataKey(dataDatabase, dataTable, page, filters, sort, dataQuickFilter);
+    const cached = getCached<{ result: QueryResult; cols: ColumnInfo[]; fks: ForeignKeyInfo[] }>(cacheKey);
+    if (cached) {
+      const key = `${dataDatabase}.${dataTable}`;
+      setColumns(key, cached.cols);
+      setDataResult(cached.result, key, dataDatabase, dataTable, cached.cols);
+      setDataForeignKeys(cached.fks);
+      setDataPage(page);
+      return;
+    }
+
+    // Convert filterModel Record → FilterEntry[]
+    const filterEntries = filters
+      ? Object.entries(filters).map(([column, model]) => ({ column, model }))
+      : undefined;
+
+    // Build quick_filter_columns from dataColumns
+    const qfCols = dataColumns?.map(c => c.field) ?? [];
+
+    setLoadingData(true);
+    setFilteredRowCount(null);
+    const requestId = previewRequestId.current;
+    try {
+      const key = `${dataDatabase}.${dataTable}`;
+      const [result, cols, fks] = await Promise.all([
+        invoke<QueryResult>("get_table_data", {
+          connectionId: activeConnectionId,
+          database: dataDatabase,
+          table: dataTable,
+          page,
+          limit: pageSize,
+          filters: filterEntries,
+          sort: sort ?? undefined,
+          quickFilter: dataQuickFilter || undefined,
+          quickFilterColumns: dataQuickFilter ? qfCols : undefined,
+        }),
+        invoke<ColumnInfo[]>("get_columns", {
+          connectionId: activeConnectionId,
+          database: dataDatabase,
+          table: dataTable,
+        }),
+        invoke<ForeignKeyInfo[]>("get_foreign_keys", {
+          connectionId: activeConnectionId,
+          database: dataDatabase,
+          table: dataTable,
+        }).catch(() => [] as ForeignKeyInfo[]),
+      ]);
+      setCached(cacheKey, { result, cols, fks });
+      setColumns(key, cols);
+      setDataResult(result, key, dataDatabase, dataTable, cols);
+      setDataForeignKeys(fks);
+      setDataPage(page);
+      // Background COUNT
+      const offset = page * pageSize;
+      if (result.rows.length < pageSize) {
+        setDataTotalRows(offset + result.rows.length);
+      } else {
+        invoke<number>("get_table_count", {
+          connectionId: activeConnectionId,
+          database: dataDatabase,
+          table: dataTable,
+          filters: filterEntries,
+          quickFilter: dataQuickFilter || undefined,
+          quickFilterColumns: dataQuickFilter ? qfCols : undefined,
+        }).then((count) => {
+          if (previewRequestId.current !== requestId) return;
+          setDataTotalRows(count);
+        }).catch(console.error);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoadingData(false);
+    }
+  }, [activeConnectionId, dataDatabase, dataTable, dataColumns, dataQuickFilter,
+      setDataResult, setDataForeignKeys, setColumns, setLoadingData, setDataPage, setDataTotalRows]);
+
+  const handleGridFilterChanged = useCallback((api: GridApi) => {
+    if (activeBottomTab !== "data" || isServerReloadingRef.current) {
+      extractFilterState(api);
+      return;
+    }
+    const model = api.getFilterModel() as Record<string, unknown>;
+    // Clear AG-Grid filter model to avoid double-filtering (server already filters)
+    isServerReloadingRef.current = true;
+    api.setFilterModel(null);
+    isServerReloadingRef.current = false;
+
+    const newModel = Object.keys(model).length > 0 ? model : null;
+    setDataFilterModel(newModel);
+    updateActiveFiltersFromModel(newModel);
+    setDataPage(0);
+    // Trigger reload with updated store state — schedule microtask so store updates first
+    setTimeout(() => reloadDataWithCurrentState(0), 0);
+  }, [activeBottomTab, extractFilterState, setDataFilterModel, updateActiveFiltersFromModel, setDataPage, reloadDataWithCurrentState]);
+
+  const handleSortChanged = useCallback((api: GridApi) => {
+    if (activeBottomTab !== "data") return;
+    const sortState = api.getColumnState()
+      .filter(c => c.sort != null)
+      .map(c => ({ column: c.colId, direction: c.sort as "asc" | "desc" })) as SortEntry[];
+    setDataSort(sortState.length ? sortState : null);
+    setTimeout(() => reloadDataWithCurrentState(0), 0);
+  }, [activeBottomTab, setDataSort, reloadDataWithCurrentState]);
+
   // Clear a specific column filter
   const handleClearColumnFilter = useCallback((column: string) => {
+    if (activeBottomTab === "data") {
+      const storeState = useAppStore.getState();
+      const session = getActiveSession(storeState);
+      const currentModel = session?.dataFilterModel ?? {};
+      const newModel = { ...currentModel };
+      delete newModel[column];
+      const updated = Object.keys(newModel).length ? newModel : null;
+      setDataFilterModel(updated);
+      updateActiveFiltersFromModel(updated);
+      setTimeout(() => reloadDataWithCurrentState(0), 0);
+      return;
+    }
     const api = getCurrentGridApi();
     if (!api) return;
     const model = api.getFilterModel();
@@ -236,18 +383,27 @@ export function ResultsGrid() {
       delete model[column];
       api.setFilterModel(model);
     }
-  }, [getCurrentGridApi]);
+  }, [activeBottomTab, getCurrentGridApi, setDataFilterModel, updateActiveFiltersFromModel, reloadDataWithCurrentState]);
 
   // Clear all filters (quick filter + column filters)
   const handleClearAllFilters = useCallback(() => {
     setCurrentQuickFilter("");
+    if (activeBottomTab === "data") {
+      setDataFilterModel(null);
+      setDataSort(null);
+      setActiveColumnFilters([]);
+      setFilteredRowCount(null);
+      editableGridApiRef.current?.applyColumnState({ defaultState: { sort: null } });
+      setTimeout(() => reloadDataWithCurrentState(0), 0);
+      return;
+    }
     const api = getCurrentGridApi();
     if (api) {
       api.setFilterModel(null);
     }
     setActiveColumnFilters([]);
     setFilteredRowCount(null);
-  }, [setCurrentQuickFilter, getCurrentGridApi]);
+  }, [activeBottomTab, setCurrentQuickFilter, getCurrentGridApi, setDataFilterModel, setDataSort, reloadDataWithCurrentState]);
 
   // Reset data filters when table changes
   const prevDataKeyRef = useRef<string>("");
@@ -255,6 +411,7 @@ export function ResultsGrid() {
     const key = dataResult ? `${dataDatabase}.${dataTable}` : "";
     if (key !== prevDataKeyRef.current) {
       prevDataKeyRef.current = key;
+      prevDataQuickFilterRef.current = "";
       setDataQuickFilter("");
       if (activeBottomTab === "data") {
         setActiveColumnFilters([]);
@@ -278,53 +435,45 @@ export function ResultsGrid() {
 
   // Re-read filter state when switching tabs
   useEffect(() => {
-    const api = getCurrentGridApi();
-    if (api) {
-      extractFilterState(api);
-    } else {
-      setActiveColumnFilters([]);
+    if (activeBottomTab === "data") {
+      updateActiveFiltersFromModel(dataFilterModel);
       setFilteredRowCount(null);
+    } else {
+      const api = getCurrentGridApi();
+      if (api) {
+        extractFilterState(api);
+      } else {
+        setActiveColumnFilters([]);
+        setFilteredRowCount(null);
+      }
     }
-  }, [activeBottomTab, getCurrentGridApi, extractFilterState]);
+  }, [activeBottomTab, getCurrentGridApi, extractFilterState, updateActiveFiltersFromModel, dataFilterModel]);
 
-  // Reload data after apply — mantiene la página actual
+  // Debounce quick filter for Data tab — 400ms
+  // prevDataQuickFilterRef tracks the last value that triggered a reload, so that
+  // a dataTable change (which re-runs this effect) doesn't fire an extra fetch.
+  const quickFilterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevDataQuickFilterRef = useRef(dataQuickFilter);
+  useEffect(() => {
+    if (activeBottomTab !== "data" || !dataTable) return;
+    if (dataQuickFilter === prevDataQuickFilterRef.current) return;
+    prevDataQuickFilterRef.current = dataQuickFilter;
+    if (quickFilterTimerRef.current) clearTimeout(quickFilterTimerRef.current);
+    quickFilterTimerRef.current = setTimeout(() => {
+      reloadDataWithCurrentState(0);
+    }, 400);
+    return () => {
+      if (quickFilterTimerRef.current) clearTimeout(quickFilterTimerRef.current);
+    };
+  }, [dataQuickFilter, activeBottomTab, dataTable]);
+
+  // Reload data after apply — invalida cache y mantiene la página actual
   const handleDataReload = useCallback(async () => {
     if (!activeConnectionId || !dataDatabase || !dataTable) return;
-    const activeSession = getActiveSession(useAppStore.getState());
-    const currentPage = activeSession?.dataPage ?? 0;
-    const pageSize = activeSession?.dataPageSize ?? 1000;
-    setLoadingData(true);
-    setFilteredRowCount(null);
-    try {
-      const key = `${dataDatabase}.${dataTable}`;
-      const [result, cols, countResult] = await Promise.all([
-        invoke<QueryResult>("get_table_data", {
-          connectionId: activeConnectionId,
-          database: dataDatabase,
-          table: dataTable,
-          page: currentPage,
-          limit: pageSize,
-        }),
-        invoke<import("../../types").ColumnInfo[]>("get_columns", {
-          connectionId: activeConnectionId,
-          database: dataDatabase,
-          table: dataTable,
-        }),
-        invoke<QueryResult>("execute_query", {
-          connectionId: activeConnectionId,
-          sql: `SELECT COUNT(*) AS cnt FROM \`${dataDatabase}\`.\`${dataTable}\``,
-        }),
-      ]);
-      setColumns(key, cols);
-      setDataResult(result, key, dataDatabase, dataTable, cols);
-      const totalRows = countResult.rows[0]?.[0];
-      setDataTotalRows(typeof totalRows === "number" ? totalRows : Number(totalRows));
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoadingData(false);
-    }
-  }, [activeConnectionId, dataDatabase, dataTable, setDataResult, setColumns, setLoadingData, setDataTotalRows]);
+    invalidatePrefix(`data:${dataDatabase}.${dataTable}.`);
+    const currentPage = getActiveSession(useAppStore.getState())?.dataPage ?? 0;
+    await reloadDataWithCurrentState(currentPage);
+  }, [activeConnectionId, dataDatabase, dataTable, reloadDataWithCurrentState]);
 
   // Ctrl+F → focus filter input; F5 → reload data tab
   useEffect(() => {
@@ -349,29 +498,11 @@ export function ResultsGrid() {
   // Determine which result to show stats for in the tab bar
   const visibleResult = activeBottomTab === "data" ? dataResult : queryResult;
 
-  // Navegar páginas del data preview
+  // Navegar páginas del data preview — preserva filtros y sort activos
   const loadDataPage = useCallback(async (page: number) => {
     if (!activeConnectionId || !dataDatabase || !dataTable) return;
-    const pageSize = getActiveSession(useAppStore.getState())?.dataPageSize ?? 1000;
-    setLoadingData(true);
-    setFilteredRowCount(null);
-    try {
-      const key = `${dataDatabase}.${dataTable}`;
-      const result = await invoke<QueryResult>("get_table_data", {
-        connectionId: activeConnectionId,
-        database: dataDatabase,
-        table: dataTable,
-        page,
-        limit: pageSize,
-      });
-      setDataResult(result, key, dataDatabase, dataTable, dataColumns);
-      setDataPage(page);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoadingData(false);
-    }
-  }, [activeConnectionId, dataDatabase, dataTable, dataColumns, setDataResult, setLoadingData, setDataPage]);
+    await reloadDataWithCurrentState(page);
+  }, [activeConnectionId, dataDatabase, dataTable, reloadDataWithCurrentState]);
 
   const tabs = [
     { key: "data" as const, label: dataTableName ? `Data: ${dataTableName}` : "Data" },
@@ -522,11 +653,13 @@ export function ResultsGrid() {
                 database={dataDatabase}
                 table={dataTable}
                 columns={dataColumns}
+                foreignKeys={dataForeignKeys ?? []}
                 primaryKeys={dataPrimaryKeys}
                 connectionId={activeConnectionId}
                 onDataReload={handleDataReload}
                 onFilterChanged={handleGridFilterChanged}
-                quickFilterText={dataQuickFilter}
+                onSortChanged={handleSortChanged}
+                quickFilterText=""
                 onGridReady={handleEditableGridReady}
               />
             ) : dataResult ? (

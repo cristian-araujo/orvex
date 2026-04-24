@@ -10,6 +10,22 @@ const EMPTY_TABS: QueryTab[] = [];
 import type { editor } from "monaco-editor";
 import { KeyCode, KeyMod } from "monaco-editor";
 
+export const sqlEditorBridge = {
+  executeCurrentStatement: (() => {}) as () => void,
+};
+
+function extractStatementAtCursor(sql: string, offset: number): string {
+  let start = 0;
+  let end = sql.length;
+  for (let i = offset - 1; i >= 0; i--) {
+    if (sql[i] === ";") { start = i + 1; break; }
+  }
+  for (let i = offset; i < sql.length; i++) {
+    if (sql[i] === ";") { end = i; break; }
+  }
+  return sql.slice(start, end).trim();
+}
+
 function ensureLimit(sql: string, defaultLimit = 1000): { sql: string; autoLimited: boolean } {
   const trimmed = sql.trim();
   const first = trimmed.split(/\s+/)[0]?.toUpperCase() ?? "";
@@ -37,6 +53,9 @@ export function SqlEditor() {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   // Ref siempre apunta a la versión actual de executeQuery — evita stale closure en Monaco commands
   const executeQueryRef = useRef<() => void>(() => {});
+  const executeCurrentStatementRef = useRef<() => void>(() => {});
+  // Cursor/selection snapshot actualizado en cada cambio — no depende del focus al momento del click
+  const lastCursorStateRef = useRef<{ offset: number; selectionText: string | null }>({ offset: 0, selectionText: null });
 
   const activeTab = queryTabs.find((t) => t.id === activeTabId);
 
@@ -79,10 +98,48 @@ export function SqlEditor() {
     }
   }, []); // sin deps — lee store directamente, nunca es stale
 
-  // Mantener el ref actualizado
+  const executeCurrentStatement = useCallback(async () => {
+    const state = useAppStore.getState();
+    const activeSession = getActiveSession(state);
+    if (!activeSession) return;
+    const { activeTabId, connectionId: activeConnectionId, selectedDatabase } = activeSession;
+    if (!activeTabId || !activeConnectionId) return;
+
+    const tab = activeSession.queryTabs.find((t) => t.id === activeTabId);
+    if (!tab) return;
+
+    // Usar lastCursorStateRef — poblado por onDidChangeCursorSelection, no depende del focus
+    const { selectionText, offset } = lastCursorStateRef.current;
+    const sql = selectionText ?? extractStatementAtCursor(tab.sql, offset);
+
+    if (!sql) return;
+
+    const { sql: safeSql, autoLimited } = ensureLimit(sql);
+
+    useAppStore.getState().setTabExecuting(activeTabId, true);
+    useAppStore.getState().setTabError(activeTabId, null);
+    useAppStore.getState().setActiveBottomTab("results");
+
+    try {
+      const result = await invoke("execute_query", { connectionId: activeConnectionId, sql: safeSql, database: selectedDatabase });
+      useAppStore.getState().setTabResult(activeTabId, result as any);
+      useAppStore.getState().setTabAutoLimited(activeTabId, autoLimited);
+    } catch (e) {
+      useAppStore.getState().setTabError(activeTabId, String(e));
+      useAppStore.getState().setActiveBottomTab("messages");
+    } finally {
+      useAppStore.getState().setTabExecuting(activeTabId, false);
+    }
+  }, []); // sin deps — lee store directamente, nunca es stale
+
+  // Mantener refs actualizados
   useEffect(() => {
     executeQueryRef.current = executeQuery;
   }, [executeQuery]);
+
+  useEffect(() => {
+    executeCurrentStatementRef.current = executeCurrentStatement;
+  }, [executeCurrentStatement]);
 
   const handleMount: OnMount = (editorInstance) => {
     editorRef.current = editorInstance;
@@ -151,9 +208,25 @@ export function SqlEditor() {
       };
     }
 
+    // Mantener snapshot de cursor/selección independiente del focus
+    editorInstance.onDidChangeCursorSelection((e) => {
+      const model = editorInstance.getModel();
+      if (!model) return;
+      const sel = e.selection;
+      if (sel.isEmpty()) {
+        lastCursorStateRef.current = { offset: model.getOffsetAt(sel.getStartPosition()), selectionText: null };
+      } else {
+        lastCursorStateRef.current = { offset: 0, selectionText: model.getValueInRange(sel) };
+      }
+    });
+
     // Los comandos invocan el ref, que siempre apunta a la función actual
     editorInstance.addCommand(KeyCode.F9, () => executeQueryRef.current());
     editorInstance.addCommand(KeyCode.F5, () => executeQueryRef.current());
+    editorInstance.addCommand(KeyMod.CtrlCmd | KeyCode.Enter, () => executeCurrentStatementRef.current());
+
+    // Actualizar bridge para que App.tsx pueda invocar executeCurrentStatement
+    sqlEditorBridge.executeCurrentStatement = () => executeCurrentStatementRef.current();
   };
 
   if (!activeTab) {
@@ -202,7 +275,7 @@ export function SqlEditor() {
         color: "var(--text-muted)",
         pointerEvents: "none",
       }}>
-        F9 / F5 to execute
+        F9/F5 · Ctrl+Enter current
       </div>
     </div>
   );

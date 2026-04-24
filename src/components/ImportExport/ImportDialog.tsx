@@ -28,6 +28,7 @@ export function ImportDialog() {
   const [database, setDatabase] = useState(selectedDatabase ?? "");
   const [stopOnError, setStopOnError] = useState(true);
   const [disableStrictMode, setDisableStrictMode] = useState(true);
+  const [deferFulltext, setDeferFulltext] = useState(true);
   const [starting, setStarting] = useState(false);
   const [hovering, setHovering] = useState(false);
 
@@ -49,6 +50,7 @@ export function ImportDialog() {
         database,
         stop_on_error: stopOnError,
         disable_strict_mode: disableStrictMode,
+        defer_fulltext: deferFulltext,
       };
       const operationId = await invoke<string>("start_import", { connectionId, options });
       setShowImportDialog(false);
@@ -332,6 +334,52 @@ export function ImportDialog() {
                 </div>
                 <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
                   Disables strict SQL modes — required for WordPress, legacy mysqldumps
+                </div>
+              </div>
+            </div>
+
+            {/* Defer FULLTEXT indexes */}
+            <div
+              onClick={() => setDeferFulltext((v) => !v)}
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 10,
+                padding: "10px 12px",
+                border: `1px solid ${deferFulltext ? "var(--accent)" : "var(--border)"}`,
+                borderLeft: `3px solid ${deferFulltext ? "var(--accent)" : "transparent"}`,
+                background: deferFulltext ? "rgba(0,120,212,0.06)" : "var(--bg-surface)",
+                borderRadius: 3,
+                cursor: "pointer",
+                userSelect: "none",
+                transition: "all 0.1s",
+              }}
+            >
+              <div style={{
+                width: 14,
+                height: 14,
+                marginTop: 1,
+                flexShrink: 0,
+                border: `1.5px solid ${deferFulltext ? "var(--accent)" : "var(--border)"}`,
+                borderRadius: 3,
+                background: deferFulltext ? "var(--accent)" : "transparent",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transition: "all 0.1s",
+              }}>
+                {deferFulltext && (
+                  <svg width="8" height="6" viewBox="0 0 8 6" fill="none">
+                    <path d="M1 3l2 2 4-4" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </div>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: deferFulltext ? "var(--text-bright)" : "var(--text)" }}>
+                  Defer FULLTEXT indexes
+                </div>
+                <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
+                  Builds FULLTEXT indexes after data import — much faster for WordPress &amp; large datasets
                 </div>
               </div>
             </div>
