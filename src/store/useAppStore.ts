@@ -61,6 +61,7 @@ interface AppState {
   restoreSessions: (sessions: ConnectionSession[], activeSessionId: string | null) => void;
   updateSessionConnectionId: (sessionId: string, connectionId: string) => void;
   reconnectSession: (sessionId: string) => Promise<void>;
+  reorderSessions: (fromId: string, toId: string) => void;
   setIsRestoring: (restoring: boolean) => void;
 
   // Global actions
@@ -235,6 +236,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     } finally {
       set({ reconnectingSessionId: null });
     }
+  },
+
+  reorderSessions: (fromId, toId) => {
+    const sessions = get().sessions;
+    const fromIdx = sessions.findIndex(s => s.id === fromId);
+    const toIdx = sessions.findIndex(s => s.id === toId);
+    if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+    const next = [...sessions];
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    set({ sessions: next });
   },
 
   setIsRestoring: (restoring) => set({ isRestoring: restoring }),
