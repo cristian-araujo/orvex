@@ -79,6 +79,7 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
   const [exportProgress, setExportProgress] = useState<ExportProgressPayload | null>(null);
   const [importProgress, setImportProgress] = useState<ImportProgressPayload | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const cancelTimeoutRef = useRef<number | null>(null);
 
   // Local elapsed timer — advances every 250ms independently of backend events
   // so the clock keeps running even when MySQL is executing a long statement.
@@ -128,6 +129,27 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
     }
   }, [importProgress?.elapsed_ms, exportProgress?.elapsed_ms, type]);
 
+  // Limpiar el timeout de cancel cuando llega evento terminal
+  const isTerminalPhase = (() => {
+    const phase = (type === "import" ? importProgress?.phase : exportProgress?.phase) ?? "starting";
+    return phase === "complete" || phase === "error" || phase === "cancelled";
+  })();
+  useEffect(() => {
+    if (isTerminalPhase && cancelTimeoutRef.current !== null) {
+      clearTimeout(cancelTimeoutRef.current);
+      cancelTimeoutRef.current = null;
+    }
+  }, [isTerminalPhase]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (cancelTimeoutRef.current !== null) {
+        clearTimeout(cancelTimeoutRef.current);
+      }
+    };
+  }, []);
+
   // Tick every 250ms while operation is running so the clock never freezes
   useEffect(() => {
     const phase = (type === "import" ? importProgress?.phase : exportProgress?.phase) ?? "starting";
@@ -146,21 +168,31 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
 
   const handleCancel = async () => {
     setCancelling(true);
+    // Fallback: si el backend no confirma "cancelled" en 30s, liberar el botón.
+    // En condiciones normales el evento terminal llega antes y limpia el timeout.
+    cancelTimeoutRef.current = window.setTimeout(() => {
+      setCancelling(false);
+      cancelTimeoutRef.current = null;
+    }, 30_000);
     try {
       const cmd = type === "export" ? "cancel_export" : "cancel_import";
       await invoke(cmd, { operationId });
+      // No resetear cancelling aquí: el botón queda en "Cancelling..." hasta
+      // que llegue el evento terminal (phase = cancelled/complete/error).
     } catch (_) {
-    } finally {
-      // Resetear siempre: el backend puede tardar en responder con "cancelled"
-      // pero el flag ya fue seteado. No dejar el UI bloqueado en "Cancelling...".
+      // Si el invoke falla, liberar inmediatamente.
       setCancelling(false);
+      if (cancelTimeoutRef.current !== null) {
+        clearTimeout(cancelTimeoutRef.current);
+        cancelTimeoutRef.current = null;
+      }
     }
   };
 
   const isExport = type === "export";
   const progress = isExport ? exportProgress : importProgress;
   const phase = progress?.phase ?? "starting";
-  const isTerminal = phase === "complete" || phase === "error" || phase === "cancelled";
+  const isTerminal = isTerminalPhase;
 
   let progressPercent = 0;
   if (isExport && exportProgress && exportProgress.tables_total > 0) {
@@ -176,7 +208,9 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
         ? "var(--text-muted)"
         : phase === "complete"
           ? "#6a9955"
-          : "var(--accent)";
+          : phase === "indexing"
+            ? "#c9a227"
+            : "var(--accent)";
 
   const phaseLabel =
     phase === "complete"
@@ -187,9 +221,11 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
           ? "CANCELLED"
           : phase === "starting"
             ? "STARTING"
-            : isExport
-              ? "EXPORTING"
-              : "IMPORTING";
+            : phase === "indexing"
+              ? "INDEXING"
+              : isExport
+                ? "EXPORTING"
+                : "IMPORTING";
 
   const isActive = !isTerminal && phase !== "starting";
 
@@ -386,7 +422,7 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
                     borderRadius: 3,
                     padding: "6px 10px",
                     fontSize: 10,
-                    
+
                     color: "var(--text-muted)",
                     whiteSpace: "nowrap",
                     overflow: "hidden",
@@ -395,6 +431,26 @@ export function ProgressDialog({ type, operationId }: ProgressDialogProps) {
                     title={importProgress.current_statement_preview}
                   >
                     {importProgress.current_statement_preview}
+                  </div>
+                )}
+                {/* Last non-fatal error — visible even when stop_on_error = false */}
+                {importProgress.errors_count > 0 && importProgress.last_error && phase !== "error" && (
+                  <div style={{
+                    background: "rgba(244,71,71,0.04)",
+                    border: "1px solid rgba(244,71,71,0.25)",
+                    borderLeft: "3px solid rgba(244,71,71,0.6)",
+                    borderRadius: 3,
+                    padding: "6px 10px",
+                    fontSize: 10,
+                    color: "rgba(244,71,71,0.85)",
+                    wordBreak: "break-all",
+                    maxHeight: 64,
+                    overflowY: "auto",
+                  }}
+                    title={importProgress.last_error}
+                  >
+                    <span style={{ fontWeight: 700, marginRight: 4 }}>Last error:</span>
+                    {importProgress.last_error}
                   </div>
                 )}
               </>
