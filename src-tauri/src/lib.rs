@@ -39,6 +39,7 @@ pub fn run() {
             // Query
             execute_query,
             get_table_data,
+            get_table_count,
             apply_table_edits,
             // Schema
             get_charsets,
@@ -52,6 +53,7 @@ pub fn run() {
             truncate_table,
             drop_database,
             drop_all_tables,
+            get_foreign_keys,
             get_table_auto_increment,
             set_table_auto_increment,
             // Session

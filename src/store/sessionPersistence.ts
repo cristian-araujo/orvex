@@ -86,11 +86,14 @@ export function deserializeSession(
     dataDatabase: null,
     dataTable: null,
     dataColumns: null,
+    dataForeignKeys: null,
     dataPrimaryKeys: [],
     isLoadingData: false,
     dataPage: 0,
     dataPageSize: 1000,
     dataTotalRows: null,
+    dataFilterModel: null,
+    dataSort: null,
   };
 }
 

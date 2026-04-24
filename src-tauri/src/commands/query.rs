@@ -2,7 +2,7 @@ use sqlx::{Pool, MySql, Row, Column, Arguments};
 use sqlx::mysql::{MySqlArguments, MySqlConnection};
 use tauri::State;
 use crate::db::manager::ConnectionManager;
-use crate::models::{QueryResult, TableEditRequest, TableEditOperation, ApplyEditsResult};
+use crate::models::{QueryResult, TableEditRequest, TableEditOperation, ApplyEditsResult, FilterEntry, SortEntry};
 
 fn is_fetchable(sql: &str) -> bool {
     let first = sql.trim().split_whitespace().next().unwrap_or("").to_uppercase();
@@ -155,6 +155,133 @@ pub async fn execute_query(
     .map_err(|e| e.to_string())?
 }
 
+fn filter_condition_to_sql(col: &str, model: &serde_json::Value, args: &mut MySqlArguments) -> Result<String, String> {
+    // Compound filter: { operator: "AND"|"OR", conditions: [...] }
+    if let Some(conditions) = model.get("conditions").and_then(|v| v.as_array()) {
+        let operator = model.get("operator").and_then(|v| v.as_str()).unwrap_or("AND");
+        let op_str = if operator.eq_ignore_ascii_case("OR") { " OR " } else { " AND " };
+        let parts: Vec<String> = conditions
+            .iter()
+            .map(|c| filter_condition_to_sql(col, c, args))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(format!("({})", parts.join(op_str)));
+    }
+
+    let filter_type = model.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let escaped = sanitize_ident(col);
+
+    match filter_type {
+        "blank" => Ok(format!("(`{}` IS NULL OR `{}` = '')", escaped, escaped)),
+        "notBlank" => Ok(format!("(`{}` IS NOT NULL AND `{}` != '')", escaped, escaped)),
+        "equals" => {
+            let val = model.get("filter").ok_or("missing filter value")?;
+            add_json_to_args(args, val);
+            Ok(format!("`{}` = ?", escaped))
+        }
+        "notEqual" => {
+            let val = model.get("filter").ok_or("missing filter value")?;
+            add_json_to_args(args, val);
+            Ok(format!("`{}` != ?", escaped))
+        }
+        "contains" => {
+            let v = model.get("filter").and_then(|v| v.as_str()).unwrap_or("");
+            use sqlx::Arguments;
+            args.add(format!("%{}%", v));
+            Ok(format!("`{}` LIKE ?", escaped))
+        }
+        "notContains" => {
+            let v = model.get("filter").and_then(|v| v.as_str()).unwrap_or("");
+            use sqlx::Arguments;
+            args.add(format!("%{}%", v));
+            Ok(format!("`{}` NOT LIKE ?", escaped))
+        }
+        "startsWith" => {
+            let v = model.get("filter").and_then(|v| v.as_str()).unwrap_or("");
+            use sqlx::Arguments;
+            args.add(format!("{}%", v));
+            Ok(format!("`{}` LIKE ?", escaped))
+        }
+        "endsWith" => {
+            let v = model.get("filter").and_then(|v| v.as_str()).unwrap_or("");
+            use sqlx::Arguments;
+            args.add(format!("%{}", v));
+            Ok(format!("`{}` LIKE ?", escaped))
+        }
+        "greaterThan" => {
+            let val = model.get("filter").ok_or("missing filter value")?;
+            add_json_to_args(args, val);
+            Ok(format!("`{}` > ?", escaped))
+        }
+        "greaterThanOrEqual" => {
+            let val = model.get("filter").ok_or("missing filter value")?;
+            add_json_to_args(args, val);
+            Ok(format!("`{}` >= ?", escaped))
+        }
+        "lessThan" => {
+            let val = model.get("filter").ok_or("missing filter value")?;
+            add_json_to_args(args, val);
+            Ok(format!("`{}` < ?", escaped))
+        }
+        "lessThanOrEqual" => {
+            let val = model.get("filter").ok_or("missing filter value")?;
+            add_json_to_args(args, val);
+            Ok(format!("`{}` <= ?", escaped))
+        }
+        "inRange" => {
+            let from = model.get("filter").ok_or("missing filter value")?;
+            let to = model.get("filterTo").ok_or("missing filterTo value")?;
+            add_json_to_args(args, from);
+            add_json_to_args(args, to);
+            Ok(format!("`{}` BETWEEN ? AND ?", escaped))
+        }
+        other => Err(format!("unsupported filter type: {}", other)),
+    }
+}
+
+fn build_where_clause(
+    filters: &[FilterEntry],
+    quick_filter: Option<&str>,
+    quick_filter_columns: &[String],
+    args: &mut MySqlArguments,
+) -> String {
+    let mut parts: Vec<String> = vec![];
+
+    for entry in filters {
+        match filter_condition_to_sql(&entry.column, &entry.model, args) {
+            Ok(cond) => parts.push(cond),
+            Err(e) => eprintln!("filter error for column {}: {}", entry.column, e),
+        }
+    }
+
+    if let Some(qf) = quick_filter {
+        if !qf.is_empty() && !quick_filter_columns.is_empty() {
+            let qf_parts: Vec<String> = quick_filter_columns.iter().map(|col| {
+                use sqlx::Arguments;
+                args.add(format!("%{}%", qf));
+                format!("`{}` LIKE ?", sanitize_ident(col))
+            }).collect();
+            parts.push(format!("({})", qf_parts.join(" OR ")));
+        }
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", parts.join(" AND "))
+    }
+}
+
+fn build_order_by_clause(sort: &[SortEntry]) -> String {
+    if sort.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = sort.iter().map(|s| {
+        let dir = if s.direction.eq_ignore_ascii_case("desc") { "DESC" } else { "ASC" };
+        format!("`{}` {}", sanitize_ident(&s.column), dir)
+    }).collect();
+    format!("ORDER BY {}", parts.join(", "))
+}
+
 #[tauri::command]
 pub async fn get_table_data(
     state: State<'_, ConnectionManager>,
@@ -163,14 +290,92 @@ pub async fn get_table_data(
     table: String,
     page: u32,
     limit: u32,
+    filters: Option<Vec<FilterEntry>>,
+    sort: Option<Vec<SortEntry>>,
+    quick_filter: Option<String>,
+    quick_filter_columns: Option<Vec<String>>,
 ) -> Result<QueryResult, String> {
     let pool = state.get_pool(&connection_id)?;
     let offset = page * limit;
+
+    let filters = filters.unwrap_or_default();
+    let sort = sort.unwrap_or_default();
+    let qf_cols = quick_filter_columns.unwrap_or_default();
+
+    let mut args = MySqlArguments::default();
+    let where_clause = build_where_clause(&filters, quick_filter.as_deref(), &qf_cols, &mut args);
+    let order_by_clause = build_order_by_clause(&sort);
+
+    use sqlx::Arguments;
+    args.add(limit);
+    args.add(offset);
+
     let sql = format!(
-        "SELECT * FROM `{}`.`{}` LIMIT {} OFFSET {}",
-        database, table, limit, offset
+        "SELECT * FROM `{}`.`{}` {} {} LIMIT ? OFFSET ?",
+        sanitize_ident(&database),
+        sanitize_ident(&table),
+        where_clause,
+        order_by_clause,
     );
-    run_query(&pool, &sql).await
+
+    let start = std::time::Instant::now();
+    let pool_ref = pool.clone();
+    let rows = sqlx::query_with(&sql, args)
+        .fetch_all(&pool_ref)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let columns: Vec<String> = if rows.is_empty() {
+        vec![]
+    } else {
+        rows[0].columns().iter().map(|c| c.name().to_string()).collect()
+    };
+
+    let data: Vec<Vec<serde_json::Value>> = rows
+        .iter()
+        .map(|row| (0..row.columns().len()).map(|i| cell_to_json(row, i)).collect())
+        .collect();
+
+    Ok(QueryResult {
+        columns,
+        rows_affected: data.len() as u64,
+        rows: data,
+        execution_time_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+#[tauri::command]
+pub async fn get_table_count(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+    table: String,
+    filters: Option<Vec<FilterEntry>>,
+    quick_filter: Option<String>,
+    quick_filter_columns: Option<Vec<String>>,
+) -> Result<u64, String> {
+    let pool = state.get_pool(&connection_id)?;
+
+    let filters = filters.unwrap_or_default();
+    let qf_cols = quick_filter_columns.unwrap_or_default();
+
+    let mut args = MySqlArguments::default();
+    let where_clause = build_where_clause(&filters, quick_filter.as_deref(), &qf_cols, &mut args);
+
+    let sql = format!(
+        "SELECT COUNT(*) FROM `{}`.`{}` {}",
+        sanitize_ident(&database),
+        sanitize_ident(&table),
+        where_clause,
+    );
+
+    let row = sqlx::query_with(&sql, args)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let count: i64 = row.try_get(0).map_err(|e| e.to_string())?;
+    Ok(count as u64)
 }
 
 // Sanitize identifier: escape backticks to prevent SQL injection

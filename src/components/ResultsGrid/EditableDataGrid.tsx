@@ -7,7 +7,8 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore } from "../../store/useAppStore";
 import { ConfirmDialog } from "./ConfirmDialog";
-import type { ColumnInfo, QueryResult, TableEditOperation, TableEditRequest, ApplyEditsResult, DatetimeDisplayFormat } from "../../types";
+import { FkPickerModal } from "./FkPickerModal";
+import type { ColumnInfo, ForeignKeyInfo, QueryResult, TableEditOperation, TableEditRequest, ApplyEditsResult, DatetimeDisplayFormat } from "../../types";
 
 function formatDatetimeValue(value: unknown, colInfo: ColumnInfo | undefined, fmt: DatetimeDisplayFormat): string {
   const str = String(value);
@@ -72,15 +73,26 @@ interface CellContextMenuState {
   canSetNull: boolean;
 }
 
+interface FkPickerState {
+  rowIndex: number;
+  column: string;
+  referencedTable: string;
+  referencedColumn: string;
+  currentValue: unknown;
+  nullable: boolean;
+}
+
 interface EditableDataGridProps {
   result: QueryResult;
   database: string;
   table: string;
   columns: ColumnInfo[];
+  foreignKeys: ForeignKeyInfo[];
   primaryKeys: string[];
   connectionId: string;
   onDataReload: () => void;
   onFilterChanged?: (api: GridApi) => void;
+  onSortChanged?: (api: GridApi) => void;
   quickFilterText?: string;
   onGridReady?: (api: GridApi) => void;
 }
@@ -153,10 +165,12 @@ export function EditableDataGrid({
   database,
   table,
   columns: columnInfos,
+  foreignKeys,
   primaryKeys,
   connectionId,
   onDataReload,
   onFilterChanged,
+  onSortChanged,
   quickFilterText,
   onGridReady,
 }: EditableDataGridProps) {
@@ -178,6 +192,7 @@ export function EditableDataGrid({
   const [applyError, setApplyError] = useState<string | null>(null);
   const [jsonEditor, setJsonEditor] = useState<JsonEditorState | null>(null);
   const [textEditor, setTextEditor] = useState<TextEditorState | null>(null);
+  const [fkPicker, setFkPicker] = useState<FkPickerState | null>(null);
   const [cellContextMenu, setCellContextMenu] = useState<CellContextMenuState | null>(null);
 
   // Reset edit state when the underlying data changes (user clicked a different table)
@@ -188,6 +203,7 @@ export function EditableDataGrid({
     setApplyError(null);
     setJsonEditor(null);
     setTextEditor(null);
+    setFkPicker(null);
     setCellContextMenu(null);
   }, [result]);
 
@@ -225,7 +241,9 @@ export function EditableDataGrid({
       const colInfo = columnInfos.find((c) => c.field === colName);
       const isJson = colInfo ? isJsonColumn(colInfo) : false;
       const isText = colInfo ? isTextColumn(colInfo) : false;
-      const usesModal = isJson || isText;
+      const isFk = foreignKeys.some((fk) => fk.column_name === colName);
+      // FK, JSON and TEXT columns open modal on double-click instead of inline edit
+      const usesModal = isFk || isJson || isText;
       return {
         field: colName,
         headerName: colName,
@@ -233,7 +251,6 @@ export function EditableDataGrid({
         filter: true,
         resizable: true,
         minWidth: 80,
-        // JSON and TEXT columns open modal on double-click instead of inline edit
         editable: usesModal ? false : (params: { node: { data: Record<string, unknown> } }) => {
           if (!colInfo) return true;
           const rowIdx = params.node.data.__rowIndex as number;
@@ -258,7 +275,7 @@ export function EditableDataGrid({
           if (params.value === null || params.value === undefined) {
             return { ...base, fontStyle: "italic", color: "var(--text-muted)" };
           }
-          // JSON and TEXT columns get a subtle indicator (opens modal on double-click)
+          // FK, JSON and TEXT columns get a subtle indicator (opens modal on double-click)
           if (usesModal) {
             return { ...base, cursor: "pointer", color: "var(--accent, #4fc1ff)" };
           }
@@ -272,9 +289,9 @@ export function EditableDataGrid({
     });
 
     return dataCols;
-  }, [result.columns, columnInfos, originalRowCount, deletedIndices, editedCells, nullDisplayText, datetimeFormat]);
+  }, [result.columns, columnInfos, foreignKeys, originalRowCount, deletedIndices, editedCells, nullDisplayText, datetimeFormat]);
 
-  // Double-click handler for JSON and TEXT columns — opens modal editor
+  // Double-click handler for FK, JSON and TEXT columns — opens modal editor
   const onCellDoubleClicked = useCallback((event: CellDoubleClickedEvent) => {
     const col = event.colDef.field;
     if (!col) return;
@@ -287,6 +304,20 @@ export function EditableDataGrid({
 
     const currentValue = event.data[col];
 
+    // FK columns take priority — open FK picker modal
+    const fkInfo = foreignKeys.find((fk) => fk.column_name === col);
+    if (fkInfo) {
+      setFkPicker({
+        rowIndex: rowIdx,
+        column: col,
+        referencedTable: fkInfo.referenced_table,
+        referencedColumn: fkInfo.referenced_column,
+        currentValue,
+        nullable: colInfo.nullable,
+      });
+      return;
+    }
+
     if (isJsonColumn(colInfo)) {
       const { text } = tryFormatJson(currentValue);
       setJsonEditor({ rowIndex: rowIdx, column: col, text, parseError: null });
@@ -294,7 +325,7 @@ export function EditableDataGrid({
       const text = currentValue === null || currentValue === undefined ? "" : String(currentValue);
       setTextEditor({ rowIndex: rowIdx, column: col, text, nullable: colInfo.nullable });
     }
-  }, [columnInfos, deletedIndices, originalRowCount]);
+  }, [columnInfos, foreignKeys, deletedIndices]);
 
   // Save JSON from modal
   const handleJsonSave = useCallback(() => {
@@ -374,6 +405,35 @@ export function EditableDataGrid({
 
     setTextEditor(null);
   }, [textEditor, originalRowCount, originalData]);
+
+  // Save FK value from picker modal
+  const handleFkSave = useCallback((newValue: unknown) => {
+    if (!fkPicker) return;
+    const { rowIndex, column } = fkPicker;
+
+    if (rowIndex >= originalRowCount) {
+      const insertIdx = rowIndex - originalRowCount;
+      setInsertedRows((prev) => {
+        const next = [...prev];
+        next[insertIdx] = { ...next[insertIdx], [column]: newValue };
+        return next;
+      });
+    } else {
+      const key = `${rowIndex}:${column}`;
+      const originalValue = originalData[rowIndex][column];
+      setEditedCells((prev) => {
+        const next = new Map(prev);
+        if (newValue === originalValue || (newValue !== null && newValue === String(originalValue))) {
+          next.delete(key);
+        } else {
+          next.set(key, { rowIndex, column, originalValue, newValue });
+        }
+        return next;
+      });
+    }
+
+    setFkPicker(null);
+  }, [fkPicker, originalRowCount, originalData]);
 
   // Ctrl+C / Cmd+C copies focused cell value when not in edit mode.
   // Uses DOM capture-phase listener on the container to reliably intercept the event
@@ -712,6 +772,7 @@ export function EditableDataGrid({
             filter: true,
             resizable: true,
             filterParams: { buttons: ["apply", "reset"], closeOnApply: true },
+            comparator: () => 0,
           }}
           rowHeight={gridRowHeight}
           headerHeight={28}
@@ -720,6 +781,7 @@ export function EditableDataGrid({
           onCellDoubleClicked={onCellDoubleClicked}
           onCellContextMenu={onCellContextMenu}
           onFilterChanged={(e) => onFilterChanged?.(e.api)}
+          onSortChanged={(e) => onSortChanged?.(e.api)}
           onGridReady={(e) => onGridReady?.(e.api)}
           quickFilterText={quickFilterText}
           rowSelection={{ mode: "multiRow", checkboxes: true, headerCheckbox: true }}
@@ -1022,6 +1084,21 @@ export function EditableDataGrid({
             )}
           </div>
         </>
+      )}
+
+      {/* FK Picker Modal */}
+      {fkPicker && (
+        <FkPickerModal
+          columnName={fkPicker.column}
+          referencedTable={fkPicker.referencedTable}
+          referencedColumn={fkPicker.referencedColumn}
+          currentValue={fkPicker.currentValue}
+          nullable={fkPicker.nullable}
+          connectionId={connectionId}
+          database={database}
+          onSelect={handleFkSave}
+          onClose={() => setFkPicker(null)}
+        />
       )}
 
       {/* No PK warning dialog */}

@@ -8,7 +8,9 @@ import type {
   QueryResult,
   BottomTab,
   ColumnInfo,
+  ForeignKeyInfo,
   AppSettings,
+  SortEntry,
 } from "../types";
 import { DEFAULT_SETTINGS } from "../types";
 
@@ -92,11 +94,14 @@ interface AppState {
   setTabError: (id: string, error: string | null) => void;
   setActiveBottomTab: (tab: BottomTab) => void;
   setDataResult: (result: QueryResult | null, tableName: string | null, database?: string | null, table?: string | null, columns?: ColumnInfo[] | null) => void;
+  setDataForeignKeys: (fks: ForeignKeyInfo[]) => void;
   setLoadingData: (loading: boolean) => void;
   setDataPage: (page: number) => void;
   setDataTotalRows: (total: number | null) => void;
   setTabAutoLimited: (id: string, autoLimited: boolean) => void;
   setDataPageSize: (size: number) => void;
+  setDataFilterModel: (model: Record<string, unknown> | null) => void;
+  setDataSort: (sort: SortEntry[] | null) => void;
 }
 
 export type { AppState };
@@ -146,11 +151,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       dataDatabase: null,
       dataTable: null,
       dataColumns: null,
+      dataForeignKeys: null,
       dataPrimaryKeys: [],
       isLoadingData: false,
       dataPage: 0,
       dataPageSize: 1000,
       dataTotalRows: null,
+      dataFilterModel: null,
+      dataSort: null,
     };
     set({
       sessions: [...get().sessions, session],
@@ -375,6 +383,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     })));
   },
 
+  setDataForeignKeys: (fks) =>
+    set((s) => withSessionUpdate(s, () => ({ dataForeignKeys: fks }))),
+
   setLoadingData: (loading) =>
     set((s) => withSessionUpdate(s, () => ({ isLoadingData: loading }))),
 
@@ -391,4 +402,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setDataPageSize: (size) =>
     set((s) => withSessionUpdate(s, () => ({ dataPageSize: size }))),
+
+  setDataFilterModel: (model) =>
+    set((s) => withSessionUpdate(s, () => ({ dataFilterModel: model }))),
+
+  setDataSort: (sort) =>
+    set((s) => withSessionUpdate(s, () => ({ dataSort: sort }))),
 }));

@@ -240,6 +240,36 @@ pub async fn get_table_structure(
 }
 
 #[tauri::command]
+pub async fn get_foreign_keys(
+    state: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: String,
+    table: String,
+) -> Result<Vec<ForeignKeyInfo>, String> {
+    let pool = state.get_pool(&connection_id)?;
+    let rows = sqlx::query(
+        "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+         FROM information_schema.KEY_COLUMN_USAGE \
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+         AND REFERENCED_TABLE_NAME IS NOT NULL"
+    )
+    .bind(&database)
+    .bind(&table)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|r| ForeignKeyInfo {
+            constraint_name: r.get::<String, _>(0),
+            column_name: r.get::<String, _>(1),
+            referenced_table: r.get::<String, _>(2),
+            referenced_column: r.get::<String, _>(3),
+        })
+        .collect())
+}
+
+#[tauri::command]
 pub async fn drop_table(
     state: State<'_, ConnectionManager>,
     connection_id: String,
